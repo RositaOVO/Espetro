@@ -1,6 +1,12 @@
 package org.espetro.client.gui;
 
+<<<<<<< Updated upstream
+=======
 import com.mojang.blaze3d.systems.RenderSystem;
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
+>>>>>>> Stashed changes
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.AttackIndicatorStatus;
 import net.minecraft.client.Minecraft;
@@ -18,7 +24,6 @@ import net.minecraftforge.client.event.RenderGuiOverlayEvent;
 import net.minecraftforge.client.extensions.common.IClientItemExtensions;
 import net.minecraftforge.client.gui.overlay.VanillaGuiOverlay;
 import net.minecraftforge.event.TickEvent;
-import se.mickelus.mutil.gui.GuiElement;
 
 public final class VanillaHudLayout {
     private static final ResourceLocation WIDGETS_LOCATION = ResourceLocation.withDefaultNamespace("textures/gui/widgets.png");
@@ -91,6 +96,8 @@ public final class VanillaHudLayout {
     }
 
     /**
+<<<<<<< Updated upstream
+<<<<<<< Updated upstream
      * Vanilla selected-item highlight timer. The name is drawn beside the
      * matching vertical hotbar slot instead of above the bottom-center bar.
      */
@@ -102,13 +109,39 @@ public final class VanillaHudLayout {
                 && selected.getHoverName().equals(itemNameStack.getHoverName())
                 && selected.getHighlightTip(selected.getHoverName())
                     .equals(itemNameStack.getHighlightTip(itemNameStack.getHoverName()))) {
+=======
+=======
+>>>>>>> Stashed changes
+     * 自维护「主手物品名」的显示计时，不依赖原版 Gui.tick()。
+     * 切到空槽位时立即清零，避免原版状态在部分环境下未及时清除导致残留。
+     */
+    private static void tickItemName(Minecraft mc, ItemStack mainHand) {
+        if (mainHand.isEmpty()) {
+            itemNameTimer = 0;
+        } else if (!itemNameStack.isEmpty()
+                && mainHand.getItem() == itemNameStack.getItem()
+                && mainHand.getHoverName().equals(itemNameStack.getHoverName())
+                && mainHand.getHighlightTip(mainHand.getHoverName())
+                        .equals(itemNameStack.getHighlightTip(itemNameStack.getHoverName()))) {
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
+>>>>>>> Stashed changes
             if (itemNameTimer > 0) {
                 itemNameTimer--;
             }
         } else {
             itemNameTimer = (int) (40.0D * mc.options.notificationDisplayTime().get());
         }
+<<<<<<< Updated upstream
+<<<<<<< Updated upstream
         itemNameStack = selected.copy();
+=======
+        itemNameStack = mainHand.copy();
+>>>>>>> Stashed changes
+=======
+        itemNameStack = mainHand.copy();
+>>>>>>> Stashed changes
     }
 
     public static void onRenderOverlayPre(RenderGuiOverlayEvent.Pre event) {
@@ -251,17 +284,7 @@ public final class VanillaHudLayout {
 
     private static boolean renderRightHotbar(GuiGraphics graphics, Minecraft mc, float partialTick,
                                              int screenWidth, int screenHeight) {
-        boolean[] rendered = {false};
-        GuiElement element = new GuiElement(0, 0, screenWidth, screenHeight) {
-            @Override
-            public void draw(GuiGraphics gui, int x, int y, int width, int height,
-                             int mouseX, int mouseY, float tick) {
-                rendered[0] = drawRightHotbar(gui, mc, partialTick, screenWidth, screenHeight);
-                super.draw(gui, x, y, width, height, mouseX, mouseY, tick);
-            }
-        };
-        element.draw(graphics, 0, 0, screenWidth, screenHeight, -1, -1, partialTick);
-        return rendered[0];
+        return drawRightHotbar(graphics, mc, partialTick, screenWidth, screenHeight);
     }
 
     private static boolean drawRightHotbar(GuiGraphics graphics, Minecraft mc, float partialTick,
@@ -290,8 +313,7 @@ public final class VanillaHudLayout {
         int baseX = Mth.floor(localScreenWidth - HOTBAR_RIGHT_MARGIN / HOTBAR_SCALE - SLOT_SIZE);
         int baseY = Mth.floor(Math.max(8.0F / HOTBAR_SCALE, (localScreenHeight - totalHeight) / 2.0F));
 
-        RenderSystem.enableBlend();
-        RenderSystem.defaultBlendFunc();
+        HudRenderState.begin(graphics);
 
         graphics.pose().pushPose();
         graphics.pose().scale(HOTBAR_SCALE, HOTBAR_SCALE, 1.0F);
@@ -324,7 +346,7 @@ public final class VanillaHudLayout {
 
         graphics.setColor(1.0F, 1.0F, 1.0F, 1.0F);
         graphics.pose().popPose();
-        RenderSystem.disableBlend();
+        HudRenderState.restore(graphics);
         return true;
     }
 
@@ -367,12 +389,29 @@ public final class VanillaHudLayout {
         graphics.blit(GUI_ICONS_LOCATION, x, y + 18 - filled, 18, 112 - filled, 18, filled);
     }
 
+<<<<<<< Updated upstream
+<<<<<<< Updated upstream
     private static void renderSelectedItemNameAtSlot(GuiGraphics graphics, Minecraft mc,
                                                     int slotX, int slotY, float hotbarAlpha) {
+=======
+=======
+>>>>>>> Stashed changes
+    /**
+     * 把原版屏幕中央的「主手物品名」绘制到右侧热键栏选中槽位的左侧。
+     * 显示/淡出由本类自维护的 itemNameTimer / itemNameStack 控制。
+     */
+    private static void renderSelectedItemNameAtSlot(GuiGraphics graphics, Minecraft mc,
+                                                     int baseX, int selectedY, float hotbarAlpha) {
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
+>>>>>>> Stashed changes
         if (itemNameTimer <= 0 || itemNameStack.isEmpty()) {
             return;
         }
 
+<<<<<<< Updated upstream
+<<<<<<< Updated upstream
         MutableComponent styled = Component.empty()
             .append(itemNameStack.getHoverName())
             .withStyle(itemNameStack.getRarity().getStyleModifier());
@@ -396,19 +435,50 @@ public final class VanillaHudLayout {
         graphics.fill(textX - 2, textY - 2, textX + textWidth + 2, textY + 9 + 2,
             VanillaHudNameLayout.nameBackgroundColor(fade));
         graphics.drawString(font, tip, textX, textY, 0xFFFFFF | fade << 24, true);
+=======
+=======
+>>>>>>> Stashed changes
+        MutableComponent name = Component.empty().append(itemNameStack.getHoverName())
+                .withStyle(itemNameStack.getRarity().getStyleModifier());
+        if (itemNameStack.hasCustomHoverName()) {
+            name.withStyle(ChatFormatting.ITALIC);
+        }
+        Component tip = itemNameStack.getHighlightTip(name);
+
+        int alpha = (int) ((float) itemNameTimer * 256.0F / 10.0F);
+        if (alpha > 255) {
+            alpha = 255;
+        }
+        if (alpha <= 0) {
+            return;
+        }
+        alpha = (int) (alpha * hotbarAlpha);
+        if (alpha <= 0) {
+            return;
+        }
+
+        Font font = IClientItemExtensions.of(itemNameStack).getFont(
+                itemNameStack, IClientItemExtensions.FontContext.SELECTED_ITEM_NAME);
+        if (font == null) {
+            font = mc.font;
+        }
+
+        int textWidth = font.width(tip);
+        int textX = baseX - 6 - textWidth;
+        int textY = selectedY + 7;
+
+        int backgroundAlpha = (int) (192.0F * alpha / 255.0F);
+        graphics.fill(textX - 2, textY - 2, textX + textWidth + 2, textY + 9 + 2, backgroundAlpha << 24);
+        graphics.drawString(font, tip, textX, textY, (alpha << 24) | 0xFFFFFF, true);
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
+>>>>>>> Stashed changes
     }
 
     private static void renderHealthLine(GuiGraphics graphics, Minecraft mc,
                                          int screenWidth, int screenHeight) {
-        GuiElement element = new GuiElement(0, 0, screenWidth, screenHeight) {
-            @Override
-            public void draw(GuiGraphics gui, int x, int y, int width, int height,
-                             int mouseX, int mouseY, float partialTick) {
-                drawHealthLine(gui, mc, screenWidth, screenHeight);
-                super.draw(gui, x, y, width, height, mouseX, mouseY, partialTick);
-            }
-        };
-        element.draw(graphics, 0, 0, screenWidth, screenHeight, -1, -1, 0.0F);
+        drawHealthLine(graphics, mc, screenWidth, screenHeight);
     }
 
     private static void drawHealthLine(GuiGraphics graphics, Minecraft mc,
@@ -431,15 +501,11 @@ public final class VanillaHudLayout {
             healthFilled = Math.max(1, healthFilled);
         }
 
-        RenderSystem.enableBlend();
-        RenderSystem.defaultBlendFunc();
-
         if (healthFilled > 0) {
             graphics.fill(x, healthY, x + healthFilled, healthY + HEALTH_HEIGHT, 0xFFE33434);
             graphics.fill(x, healthY, x + healthFilled, healthY + 2, 0xFFFF6B6B);
         }
-
-        RenderSystem.disableBlend();
+        HudRenderState.restore(graphics);
     }
 
     private static boolean shouldReplaceSurvivalBars(Minecraft mc) {
