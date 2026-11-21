@@ -159,7 +159,7 @@ public class ClientPacketHandlers {
         net.minecraft.client.Minecraft mc = net.minecraft.client.Minecraft.getInstance();
         if (packet.isError()) {
             String msg = packet.getErrorMessage();
-            // 右侧 AuraTip（无模组时降级聊天）
+            // 右侧 EsRadial 提示（失败时降级聊天）
             org.espetro.client.gui.EspetroTipNotifier.showRaw(msg);
             return;
         }

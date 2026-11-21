@@ -21,7 +21,7 @@
   "item.espetro.fortification_wand": "Fortification Wand",
 
   "tutorial.step.welcome.title": "Welcome to Espetro",
-  "tutorial.step.welcome.body": "AuraTip tips explain each phase and GUI. Close a tip to continue. Use /espetro tutorial skip to skip this session; reopen from the hub or command.",
+  "tutorial.step.welcome.body": "Tutorial cards explain each phase and GUI. Press Enter for the next card, or click the 退出教程 (exit) button at the bottom left. Use /espetro tutorial skip to skip this session; reopen from the hub or command.",
   "tutorial.step.hub.title": "Hub screen",
   "tutorial.step.hub.body": "Shows online count and status. After an admin starts a match you enter map vote. Entering the tutorial closes the hub and plays this guide.",
   "tutorial.step.map_vote.title": "Map vote screen",

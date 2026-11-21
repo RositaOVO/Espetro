@@ -2,7 +2,7 @@ package org.espetro.client.gui;
 
 /**
  * 兼容入口：教程已迁至 {@link TutorialClientController} + {@link TutorialHudOverlay}，
- * 不再强依赖 AuraTip 关卡片下一步。
+ * 按 Enter 进入下一步。
  */
 public final class TutorialOverlay {
 
