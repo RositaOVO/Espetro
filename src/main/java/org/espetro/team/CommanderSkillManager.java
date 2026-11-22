@@ -207,8 +207,10 @@ public class CommanderSkillManager {
         }
 
         GamePhase phase = GameStateManager.getInstance().getCurrentPhase();
-        if (phase != GamePhase.BATTLE && phase != GamePhase.DEPLOYING) {
-            Espetro.sendToPlayer(commander, "\u00a7c当前阶段无法使用技能！");
+        if (phase != GamePhase.BATTLE) {
+            Espetro.sendToPlayer(commander, phase == GamePhase.DEPLOYING
+                ? "\u00a7c部署阶段不可使用指挥官技能，进入对战阶段后才开放。"
+                : "\u00a7c当前阶段无法使用技能！");
             return false;
         }
 
@@ -269,7 +271,14 @@ public class CommanderSkillManager {
 
         try {
             Class<?> packetClass = Class.forName(ESPOINTS_ARTILLERY_PACKET_CLASS_NAME);
-            packetClass.getMethod("sendTo", ServerPlayer.class).invoke(null, commander);
+            String targetMode = artilleryTargetMode(skillId);
+            try {
+                packetClass.getMethod("sendTo", ServerPlayer.class, String.class)
+                    .invoke(null, commander, targetMode);
+            } catch (NoSuchMethodException legacy) {
+                // 旧版 EsPoints 只支持单参数：仍可用（一律按点选处理）
+                packetClass.getMethod("sendTo", ServerPlayer.class).invoke(null, commander);
+            }
             pendingTargetSkillIds.put(commander.getUUID(),
                 skillId == null || skillId.isBlank() ? EspetroCommanderSkills.DEFAULT_ARTILLERY_SKILL_ID : skillId);
             return true;
@@ -278,6 +287,97 @@ public class CommanderSkillManager {
             Espetro.sendToPlayer(commander, "\u00a7cESPoints 不支持指挥官技能选点接口，请确认双方模组版本一致。");
             return false;
         }
+    }
+
+    /** 技能的选点形态：徐进弹幕为 line（按住右键画线），其余为 point。 */
+    public static String artilleryTargetMode(String skillId) {
+        KubeCommanderSkillDefinition definition = EspetroCommanderSkills.getDefinition(skillId);
+        String trigger = definition == null ? "" : String.valueOf(definition.trigger());
+        return trigger.contains("line") || trigger.contains("barrage") ? "line" : "point";
+    }
+
+    /**
+     * 提交徐进弹幕的直线（起点 + 终点）。
+     * 校验与定点炮击一致，随后把两点交给 KubeJS 沿直线布置各轮弹幕，并广播长方形覆盖区。
+     */
+    public boolean submitBarrageTarget(ServerPlayer commander, double startX, double startZ,
+                                       double endX, double endZ) {
+        if (commander == null || !Double.isFinite(startX) || !Double.isFinite(startZ)
+            || !Double.isFinite(endX) || !Double.isFinite(endZ)) {
+            return false;
+        }
+        UUID commanderId = commander.getUUID();
+        String skillId = pendingTargetSkillIds.getOrDefault(
+            commanderId, EspetroCommanderSkills.DEFAULT_ARTILLERY_SKILL_ID);
+        KubeCommanderSkillDefinition definition = EspetroCommanderSkills.getDefinition(skillId);
+        String skillName = definition != null ? definition.displayName() : "选点技能";
+        if (definition == null || !canPlayerUseSkill(commander, definition)) {
+            Espetro.sendToPlayer(commander, "\u00a7c你没有权限提交" + skillName + "坐标！");
+            pendingTargetSkillIds.remove(commanderId);
+            return false;
+        }
+        GamePhase phase = GameStateManager.getInstance().getCurrentPhase();
+        if (phase != GamePhase.BATTLE && phase != GamePhase.DEPLOYING) {
+            Espetro.sendToPlayer(commander, "\u00a7c当前阶段无法提交" + skillName + "坐标！");
+            pendingTargetSkillIds.remove(commanderId);
+            return false;
+        }
+        if (isOnCooldown(commander.getUUID(), skillId)) {
+            int remaining = getRemainingCooldownSeconds(commander.getUUID(), skillId);
+            Espetro.sendToPlayer(commander, "\u00a7c" + skillName + "冷却中，剩余 " + remaining + " 秒");
+            pendingTargetSkillIds.remove(commanderId);
+            return false;
+        }
+        String commanderTeam = normalizeTeam(Espetro.getPlayerTeam(commander));
+        if (commanderTeam == null) {
+            Espetro.sendToPlayer(commander, "\u00a7c你不属于任何阵营，无法提交" + skillName + "坐标！");
+            pendingTargetSkillIds.remove(commanderId);
+            return false;
+        }
+
+        ServerLevel level = commander.serverLevel();
+        BlockPos startBlock = resolveArtilleryTargetBlock(level, startX, startZ);
+        BlockPos endBlock = resolveArtilleryTargetBlock(level, endX, endZ);
+        ArtillerySupportRequest request = new ArtillerySupportRequest(
+            commander.getUUID(),
+            commander.getName().getString(),
+            definition.id(),
+            skillName,
+            commanderTeam,
+            level.dimension(),
+            startX,
+            startBlock.getY(),
+            startZ,
+            startBlock,
+            level.getGameTime(),
+            System.currentTimeMillis());
+
+        pendingTargetSkillIds.remove(commanderId);
+        // 与定点炮击是同一个技能、同一个冷却：这里直接在 Java 端排程徐进弹幕，
+        // 不经过 KubeJS，避免依赖服务端脚本版本。
+        ArtilleryBarrageExecutor.start(level, startX, startZ, endX, endZ, -1);
+        finishCommanderSkill(commander, skillId, definition.displayName(),
+            definition.cooldownSeconds() * 20L);
+
+        // 本方地图上显示长方形覆盖区（线两侧各覆盖半径，弹着点都落在其中）
+        ArtilleryZoneBridge.showZone(
+            commanderTeam,
+            "line",
+            startX,
+            startZ,
+            endX,
+            endZ,
+            ArtilleryZoneBridge.COVERAGE_RADIUS,
+            definition.icon(),
+            level.dimension().location().toString(),
+            ArtilleryZoneBridge.ZONE_DURATION_MS);
+        Espetro.sendToPlayer(commander, "\u00a7a" + skillName + "弹幕已确认: "
+            + startBlock.getX() + ", " + startBlock.getZ() + " → "
+            + endBlock.getX() + ", " + endBlock.getZ());
+        Espetro.LOGGER.info("指挥官 {} 提交 {} 弹幕: ({}, {}) → ({}, {})",
+            commander.getName().getString(), skillName,
+            startBlock.getX(), startBlock.getZ(), endBlock.getX(), endBlock.getZ());
+        return true;
     }
 
     public boolean submitArtillerySupportTarget(ServerPlayer commander, double x, double z) {
@@ -361,6 +461,19 @@ public class CommanderSkillManager {
         }
 
         finishCommanderSkill(commander, skillId, definition.displayName(), definition.cooldownSeconds() * 20L);
+
+        // 本方地图上显示炮击覆盖区（红边 + 红色半透明底，圆中心画火炮图标），结束后自动消失
+        ArtilleryZoneBridge.showZone(
+            commanderTeam,
+            "circle",
+            x,
+            z,
+            0.0D,
+            0.0D,
+            ArtilleryZoneBridge.COVERAGE_RADIUS,
+            definition.icon(),
+            level.dimension().location().toString(),
+            ArtilleryZoneBridge.ZONE_DURATION_MS);
         Espetro.sendToPlayer(commander, "\u00a7a" + skillName + "坐标已提交: "
             + targetBlock.getX() + ", " + targetBlock.getY() + ", " + targetBlock.getZ());
         Espetro.LOGGER.info("指挥官 {} 提交 {} 坐标: {} {} {} ({})",
@@ -377,6 +490,9 @@ public class CommanderSkillManager {
     }
 
     private void finishCommanderSkill(ServerPlayer commander, String skillId, String displayName, long cooldownTicks) {
+        if (org.espetro.debug.EspetroDebugRules.skillNoCooldown()) {
+            cooldownTicks = 0L;   // 调试模式：不写冷却
+        }
         cooldownEndTicks
             .computeIfAbsent(commander.getUUID(), k -> new HashMap<>())
             .put(skillId, getServerTick() + cooldownTicks);
@@ -393,11 +509,49 @@ public class CommanderSkillManager {
         }
     }
 
+    /**
+     * 进入对战阶段时，为所有可使用者把技能冷却起算。
+     *
+     * <p>部署阶段禁止使用技能，因此冷却不从开局就算；统一在部署阶段结束那一刻起算。</p>
+     */
+    public void armSkillCooldownsOnBattleStart() {
+        net.minecraft.server.MinecraftServer server = Espetro.getServer();
+        if (server == null) {
+            return;
+        }
+        if (org.espetro.debug.EspetroDebugRules.skillNoCooldown(server)) {
+            return;   // 调试模式：不预先起算冷却
+        }
+        long now = getServerTick();
+        for (net.minecraft.server.level.ServerPlayer player : server.getPlayerList().getPlayers()) {
+            Map<String, Long> perSkill = cooldownEndTicks.computeIfAbsent(
+                player.getUUID(), k -> new HashMap<>());
+            boolean changed = false;
+            for (KubeCommanderSkillDefinition definition : EspetroCommanderSkills.getDefinitions()) {
+                if (definition == null || !definition.enabled()) {
+                    continue;
+                }
+                if (!canPlayerUseSkill(player, definition)) {
+                    continue;
+                }
+                perSkill.put(definition.id(), now + definition.cooldownSeconds() * 20L);
+                changed = true;
+            }
+            if (changed) {
+                NetworkManager.sendCommanderSkillSync(player);
+            }
+        }
+        Espetro.LOGGER.info("对战阶段开始：已为在线玩家起算指挥官技能冷却");
+    }
+
     public boolean isOnCooldown(UUID uuid, CommanderSkillType type) {
         return type != null && isOnCooldown(uuid, type.getId());
     }
 
     public boolean isOnCooldown(UUID uuid, String skillId) {
+        if (org.espetro.debug.EspetroDebugRules.skillNoCooldown()) {
+            return false;   // 调试模式：技能无冷却
+        }
         Map<String, Long> map = cooldownEndTicks.get(uuid);
         if (map == null) return false;
         Long endTick = map.get(skillId);

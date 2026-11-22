@@ -1,13 +1,12 @@
 package org.espetro.client.gui;
 
-import cc.sighs.auratip.api.action.Actions;
-import cc.sighs.auratip.api.client.RadialMenuClientApi;
-import cc.sighs.auratip.api.radiamenu.RadialMenuBuilder;
-import cc.sighs.auratip.api.radiamenu.RadialMenuRegistry;
-import cc.sighs.auratip.api.radiamenu.icon.IRadialIcon;
-import cc.sighs.auratip.api.radiamenu.icon.ItemIcon;
-import cc.sighs.auratip.data.RadialMenuData;
-import com.mojang.serialization.Codec;
+import org.esradial.client.Actions;
+import org.esradial.client.RadialMenuClientApi;
+import org.esradial.client.RadialMenuBuilder;
+import org.esradial.client.RadialMenuRegistry;
+import org.esradial.client.IRadialIcon;
+import org.esradial.client.ItemIcon;
+import org.esradial.client.RadialMenuData;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.network.chat.Component;
@@ -26,16 +25,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
-/** Dynamic, persistent AuraTip pages for server-authoritative per-item resupply. */
+/** Dynamic, persistent EsRadial pages for server-authoritative per-item resupply. */
 public final class ResupplyRadialController {
     private static final String OWNER = "espetro_resupply";
     private static final ResourceLocation MENU = id("resupply/items");
     private static final ResourceLocation SELECT = id("resupply/select");
     private static final ResourceLocation NAVIGATE = id("resupply/navigate");
-    private static final int PAGE_SIZE = 5;
-    private static final String AVAILABLE = "#FFFFD54F";
-    private static final String UNAVAILABLE = "#FFFF4D4D";
-    private static final String HOVER = "#FFFFFFFF";
+    /** 步兵补给不再分页：一次把服务端目录里的全部项目放进同一页（512 项足够）。 */
+    private static final int PAGE_SIZE = 512;
 
     private static boolean initialized;
     private static UUID token;
@@ -48,6 +45,7 @@ public final class ResupplyRadialController {
     private static List<ResupplyCatalogPacket.Entry> entries = List.of();
     private static boolean menuWasActive;
     private static long rebuildCount;
+    private static long themeRevision = -1L;
 
     private ResupplyRadialController() {
     }
@@ -91,6 +89,17 @@ public final class ResupplyRadialController {
 
     public static void onCatalog(ResupplyCatalogPacket packet) {
         initialize();
+        // A late vehicle reply must not reopen a wheel after F was released.
+        if (packet.source().kind() == ResupplySourceRef.Kind.VEHICLE
+            && !VehicleWheelController.isWheelActive()) {
+            NetworkManager.NET.sendToServer(new CloseResupplySessionPacket(packet.token()));
+            return;
+        }
+        if (RadialMenuClientApi.isActive() && !VehicleWheelController.isWheelActive()
+            && !RadialMenuClientApi.isOwnedBy("espetro_radio") && !isActive()) {
+            NetworkManager.NET.sendToServer(new CloseResupplySessionPacket(packet.token()));
+            return;
+        }
         token = packet.token();
         catalogRevision = packet.catalogRevision();
         stateRevision = packet.stateRevision();
@@ -107,8 +116,8 @@ public final class ResupplyRadialController {
         if (token == null || !token.equals(packet.token())) return;
         if (packet.close()) {
             EspetroTipNotifier.showDenial("补给会话已关闭", packet.message());
-            if (RadialMenuClientApi.isActive()) {
-                cc.sighs.auratip.client.render.RadialMenuOverlay.INSTANCE.close();
+            if (isActive()) {
+                RadialMenuClientApi.close();
             }
             clear(false);
             return;
@@ -131,7 +140,7 @@ public final class ResupplyRadialController {
         if (!packet.success() && !packet.message().isBlank()) {
             EspetroTipNotifier.showDenial("无法补给", packet.message());
         }
-        if (changed) replacePage();
+        if (changed && isActive()) replacePage();
     }
 
     public static void tick() {
@@ -140,6 +149,7 @@ public final class ResupplyRadialController {
             && RadialMenuClientApi.activeMenuId().filter(MENU::equals).isPresent();
         if (menuWasActive && !active) clear(true);
         menuWasActive = active;
+        if (active && themeRevision != UiTheme.revision()) replacePage();
     }
 
     public static boolean isActive() {
@@ -154,11 +164,15 @@ public final class ResupplyRadialController {
     private static void replacePage() {
         if (token == null) return;
         RadialMenuData data = buildPage();
-        if (!RadialMenuClientApi.replace(data)) {
+        boolean existing = RadialMenuClientApi.activeMenuId().filter(MENU::equals).isPresent();
+        boolean changed = existing ? RadialMenuClientApi.replace(data)
+            : RadialMenuClientApi.isActive() && RadialMenuClientApi.navigate(data);
+        if (!changed) {
             RadialMenuRegistry.setMenus(OWNER, List.of(data));
-            RadialMenuClientApi.open(MENU);
+            RadialMenuClientApi.open(data, RadialMenuClientApi.OpenOptions.click(OWNER));
         }
         rebuildCount++;
+        themeRevision = UiTheme.revision();
         menuWasActive = true;
     }
 
@@ -182,9 +196,10 @@ public final class ResupplyRadialController {
         int pages = pageCount();
         if (page >= pages) page = Math.max(0, pages - 1);
         RadialMenuBuilder builder = new RadialMenuBuilder(MENU)
+            .title(Component.literal("步兵补给 · 弹药余额 " + balance))
             .radii(44, 108)
             .animationSpeed(1.25F)
-            .ringColors(List.of("#E6141719", "#F02A2D2F"));
+            .ringColors(RadialGlassStyle.ringColors());
         int first = page * PAGE_SIZE;
         int end = Math.min(entries.size(), first + PAGE_SIZE);
         for (int i = first; i < end; i++) {
@@ -194,29 +209,30 @@ public final class ResupplyRadialController {
             iconStack.setCount(1);
             String itemName = entry.icon().isEmpty() ? entry.configuredId()
                 : entry.icon().getHoverName().getString();
-            String label = itemName + " §f+" + entry.count() + " §7"
-                + entry.current() + "/" + entry.max() + " §b[" + entry.ammoCost() + "]";
+            String label = itemName + " +" + entry.count() + " "
+                + entry.current() + "/" + entry.max() + " [" + entry.ammoCost() + "]";
             if (!entry.selectable() && !entry.reason().isBlank()) {
-                label += " §c" + entry.reason();
+                label += " " + entry.reason();
             }
             builder = builder.persistentSlot("espetro.resupply.entry." + entry.index(),
                 new ItemIcon(iconStack, 1.15F),
                 Actions.script(SELECT, Map.of("index", Integer.toString(entry.index()))),
-                Component.literal(label), HOVER,
-                entry.selectable() ? AVAILABLE : UNAVAILABLE);
+                Component.literal(label), UiTheme.hex(UiTheme.ACCENT),
+                UiTheme.hex(entry.selectable() ? UiTheme.ACCENT : UiTheme.WORLD_NEGATIVE));
+            if (!entry.selectable()) builder.disabledLast(Component.literal(entry.reason()));
         }
         builder = builder.persistentSlot("espetro.resupply.back", GlyphIcon.BACK,
             Actions.script(NAVIGATE, Map.of("action", "back")),
-            Component.literal("返回  §b余额 " + balance), "#FFAAAAAA", "#FF44484D");
+            Component.literal("返回  余额 " + balance), UiTheme.hex(UiTheme.WORLD_MUTED), UiTheme.hex(UiTheme.WORLD_MUTED));
         if (page > 0) {
             builder = builder.persistentSlot("espetro.resupply.previous", GlyphIcon.PREVIOUS,
                 Actions.script(NAVIGATE, Map.of("action", "previous")),
-                Component.literal("上一页 " + page + "/" + pages), "#FFFFFFFF", "#FF506070");
+                Component.literal("上一页 " + page + "/" + pages), UiTheme.hex(UiTheme.WORLD_TEXT), UiTheme.hex(UiTheme.ACCENT));
         }
         if (page + 1 < pages) {
             builder = builder.persistentSlot("espetro.resupply.next", GlyphIcon.NEXT,
                 Actions.script(NAVIGATE, Map.of("action", "next")),
-                Component.literal("下一页 " + (page + 2) + "/" + pages), "#FFFFFFFF", "#FF506070");
+                Component.literal("下一页 " + (page + 2) + "/" + pages), UiTheme.hex(UiTheme.WORLD_TEXT), UiTheme.hex(UiTheme.ACCENT));
         }
         return builder.build();
     }
@@ -229,8 +245,32 @@ public final class ResupplyRadialController {
         return entry;
     }
 
+    static int pageCount(int entryCount, int pageSize) {
+        int size = Math.max(1, pageSize);
+        return Math.max(1, (Math.max(0, entryCount) + size - 1) / size);
+    }
+
+    static List<String> pageSlotIds(int entryCount, int pageIndex, int balanceValue) {
+        int pages = pageCount(entryCount, PAGE_SIZE);
+        int safePage = Math.min(Math.max(0, pageIndex), pages - 1);
+        int first = safePage * PAGE_SIZE;
+        int end = Math.min(entryCount, first + PAGE_SIZE);
+        List<String> ids = new ArrayList<>();
+        for (int i = first; i < end; i++) {
+            ids.add("espetro.resupply.entry." + i);
+        }
+        ids.add("espetro.resupply.back");
+        if (safePage > 0) {
+            ids.add("espetro.resupply.previous");
+        }
+        if (safePage + 1 < pages) {
+            ids.add("espetro.resupply.next");
+        }
+        return ids;
+    }
+
     private static int pageCount() {
-        return Math.max(1, (entries.size() + PAGE_SIZE - 1) / PAGE_SIZE);
+        return pageCount(entries.size(), PAGE_SIZE);
     }
 
     private static ResupplyCatalogPacket.Entry find(int index) {
@@ -240,8 +280,8 @@ public final class ResupplyRadialController {
     private static void returnToRoot() {
         ResupplySourceRef previousSource = source;
         clear(true);
-        if (previousSource == null) return;
-        if (previousSource.kind() == ResupplySourceRef.Kind.RADIO) {
+        if (previousSource == null || RadialMenuClientApi.back()) return;
+        if (previousSource.kind() != ResupplySourceRef.Kind.VEHICLE) {
             RadioRadialController.replaceRoot();
         } else {
             VehicleWheelController.replaceRoot();
@@ -267,8 +307,6 @@ public final class ResupplyRadialController {
     private enum GlyphIcon implements IRadialIcon {
         BACK("↩"), PREVIOUS("‹"), NEXT("›");
 
-        private static final Codec<GlyphIcon> CODEC = Codec.STRING.xmap(GlyphIcon::valueOf,
-            GlyphIcon::name);
         private final String glyph;
 
         GlyphIcon(String glyph) {
@@ -284,13 +322,9 @@ public final class ResupplyRadialController {
             graphics.pose().translate(x, y, 0);
             graphics.pose().scale(drawScale, drawScale, 1.0F);
             graphics.drawString(minecraft.font, glyph, -minecraft.font.width(glyph) / 2,
-                -minecraft.font.lineHeight / 2, (opacity << 24) | 0xFFFFFF, false);
+                -minecraft.font.lineHeight / 2, UiTheme.withAlpha(UiTheme.WORLD_TEXT, opacity), false);
             graphics.pose().popPose();
         }
 
-        @Override
-        public Codec<? extends IRadialIcon> codec() {
-            return CODEC;
-        }
     }
 }

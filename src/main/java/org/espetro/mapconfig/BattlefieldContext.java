@@ -11,6 +11,7 @@ import org.espetro.api.event.BattlefieldLifecycleEvent;
 
 import javax.annotation.Nullable;
 import java.util.Optional;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -23,19 +24,30 @@ public final class BattlefieldContext {
     private static final AtomicReference<ActiveMapConfig> ACTIVE = new AtomicReference<>(null);
     private static final AtomicLong SESSION_ID = new AtomicLong(0L);
     private static volatile String lastRoundWinner = null;
+    /** Filled by ESPoints after it resolves AAS/RAAS from EsConfig. */
+    private static volatile String resolvedObjectiveMode = "";
+    private static volatile String resolvedObjectiveLane = "";
 
     private BattlefieldContext() {
     }
 
     public static void activate(ActiveMapConfig config) {
         if (config != null) {
+            ActiveMapConfig roundConfig = config.forRound(
+                ThreadLocalRandom.current().nextLong());
             // Push into legacy static GameConfig / SpawnPointConfig for gradual migration.
             // Apply first so a malformed runtime bridge can never expose a
             // half-activated battlefield through the public context.
-            GameConfigBridge.apply(config);
-            ACTIVE.set(config);
+            GameConfigBridge.apply(roundConfig);
+            ACTIVE.set(roundConfig);
             SESSION_ID.incrementAndGet();
-            Espetro.LOGGER.info("激活战场配置: {} ({})", config.displayName, config.dimensionId);
+            Espetro.LOGGER.info("激活战场配置: {} ({})，目标模式={}，路线={}",
+                roundConfig.displayName,
+                roundConfig.dimensionId,
+                roundConfig.esPoints.objectiveMode,
+                roundConfig.esPoints.objectiveLane.isEmpty()
+                    ? "固定路线"
+                    : roundConfig.esPoints.objectiveLane);
             EspetroAPI.getActiveBattlefieldSnapshot().ifPresent(snapshot ->
                 MinecraftForge.EVENT_BUS.post(new BattlefieldLifecycleEvent.Activated(snapshot)));
         } else {
@@ -47,19 +59,28 @@ public final class BattlefieldContext {
         SESSION_ID.incrementAndGet();
         ActiveMapConfig previous = ACTIVE.getAndSet(null);
         if (previous != null) {
+            String esConfigPath = previous.esConfigDir != null
+                ? previous.esConfigDir.toAbsolutePath().normalize().toString()
+                : "";
             ActiveBattlefieldSnapshot snapshot = new ActiveBattlefieldSnapshot(
                 previous.mapFolder,
                 previous.displayName,
                 previous.dimensionKey,
-                previous.esPoints.tacticalMapJson,
-                previous.esPoints.capturePointsJson,
-                previous.esPoints.backgroundImage,
-                previous.esPoints.backgroundBytes(),
-                previous.esPoints.backgroundSha256,
-                previous.esPoints.backgroundWidth,
-                previous.esPoints.backgroundHeight
+                esConfigPath,
+                previous.esPoints != null ? previous.esPoints.tacticalMapJson : "",
+                previous.esPoints != null ? previous.esPoints.capturePointsJson : "",
+                previous.esPoints != null ? previous.esPoints.backgroundImage : "",
+                previous.esPoints != null ? previous.esPoints.backgroundBytes() : new byte[0],
+                previous.esPoints != null ? previous.esPoints.backgroundSha256 : "",
+                previous.esPoints != null ? previous.esPoints.backgroundWidth : 0,
+                previous.esPoints != null ? previous.esPoints.backgroundHeight : 0,
+                previous.esPoints != null ? previous.esPoints.objectiveMode : "",
+                previous.esPoints != null ? previous.esPoints.objectiveLane : "",
+                previous.esPoints != null ? previous.esPoints.objectiveSeed : 0L
             );
             MinecraftForge.EVENT_BUS.post(new BattlefieldLifecycleEvent.Cleared(snapshot));
+            resolvedObjectiveMode = "";
+            resolvedObjectiveLane = "";
             Espetro.LOGGER.info("已清除活动战场配置");
         }
     }
@@ -75,6 +96,25 @@ public final class BattlefieldContext {
 
     public static boolean isActive() {
         return ACTIVE.get() != null;
+    }
+
+    public static String getObjectiveMode() {
+        if (resolvedObjectiveMode != null && !resolvedObjectiveMode.isBlank()) {
+            return resolvedObjectiveMode;
+        }
+        ActiveMapConfig config = ACTIVE.get();
+        return config == null || config.esPoints == null
+            ? ""
+            : config.esPoints.objectiveMode;
+    }
+
+    public static void setResolvedObjective(String mode, String laneId) {
+        resolvedObjectiveMode = mode == null ? "" : mode.trim();
+        resolvedObjectiveLane = laneId == null ? "" : laneId.trim();
+    }
+
+    public static String getObjectiveLane() {
+        return resolvedObjectiveLane == null ? "" : resolvedObjectiveLane;
     }
 
     /**

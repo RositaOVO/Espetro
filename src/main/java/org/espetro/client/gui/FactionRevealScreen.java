@@ -6,7 +6,7 @@ import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.renderer.texture.DynamicTexture;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
-import se.mickelus.mutil.gui.GuiElement;
+import org.espetro.client.aui.GuiElement;
 
 import java.io.InputStream;
 import java.nio.file.Files;
@@ -18,7 +18,7 @@ import java.util.Objects;
 /**
  * 双方最终编制揭示界面。
  */
-public class FactionRevealScreen extends MutilScreen {
+public class FactionRevealScreen extends EspetroMenuScreen {
 
     /** 默认纹理（编制图片为 null 时回退使用）。 */
     private static final ResourceLocation DEFAULT_ATTACK_TEXTURE =
@@ -47,7 +47,7 @@ public class FactionRevealScreen extends MutilScreen {
     private final int defendTexW;
     private final int defendTexH;
     private int ticksRemaining;
-    private EspetroMutilWidgets.PhaseHeader phaseHeader;
+    private VotePhase phaseHeader;
 
     public FactionRevealScreen(String attackFactionName, String defendFactionName,
                                String attackFactionImage, String defendFactionImage,
@@ -127,50 +127,31 @@ public class FactionRevealScreen extends MutilScreen {
     }
 
     @Override
-    protected void buildMutilRoot(GuiElement root) {
-        phaseHeader = EspetroMutilWidgets.addMutablePhaseHeader(root, this.width,
-            "\u00a76\u00a7l双方编制确认",
-            "\u00a7f双方最终编制已经确定",
-            "\u00a78" + getSecondsRemaining() + "秒后进入部署",
-            EspetroMutilWidgets.GOLD);
-        int headerH = EspetroMutilWidgets.PHASE_HEADER_HEIGHT;
-        boolean stacked = this.width < IMG_MAX_W * 2 + IMG_GAP + 60;
-        int cardW = stacked ? Math.min(IMG_MAX_W + 32, this.width - 28) : IMG_MAX_W + 32;
-        int gap = IMG_GAP;
-        int contentW = stacked ? cardW : cardW * 2 + gap;
-        int panelW = Math.min(this.width - 18, Math.max(contentW + 20, stacked ? cardW + 40 : 430));
-        int cardH = IMG_MAX_H + 22;
-        int panelH = stacked ? cardH * 2 + gap : cardH;
-        int panelX = (this.width - panelW) / 2;
-        int panelY = headerH + Math.max(8, (this.height - headerH - panelH) / 2);
-
-        root.addChild(EspetroMutilWidgets.panel(panelX, panelY, panelW, panelH, 0x00000000, 0x00000000));
-
-        int startX = panelX + (panelW - contentW) / 2;
-        int startY = panelY;
-        if (stacked) {
-            addFactionCard(root, startX, startY, cardW,
-                attackTexture, attackTexW, attackTexH, attackFactionName, EspetroMutilWidgets.ATTACK);
-            addFactionCard(root, startX, startY + cardH + gap, cardW,
-                defendTexture, defendTexW, defendTexH, defendFactionName, EspetroMutilWidgets.DEFEND);
-        } else {
-            addFactionCard(root, startX, startY, cardW,
-                attackTexture, attackTexW, attackTexH, attackFactionName, EspetroMutilWidgets.ATTACK);
-            addFactionCard(root, startX + cardW + gap, startY, cardW,
-                defendTexture, defendTexW, defendTexH, defendFactionName, EspetroMutilWidgets.DEFEND);
-        }
+    protected void buildMenuRoot(GuiElement root) {
+        phaseHeader = VotePhase.add(root, width, height, "双方编制确认",
+            "双方最终编制已经确定", () -> getSecondsRemaining() + " 秒后进入部署",
+            () -> VotePhase.Stage.RESULT);
+        VotePhase.Grid layout = VotePhase.grid(width, height, 2, 2, 22);
+        addFactionCard(root, layout.x(0), layout.y(0), layout.cardWidth(), layout.cardHeight(),
+            attackTexture, attackTexW, attackTexH, attackFactionName, UiTheme.ATTACK);
+        addFactionCard(root, layout.x(1), layout.y(1), layout.cardWidth(), layout.cardHeight(),
+            defendTexture, defendTexW, defendTexH, defendFactionName, UiTheme.DEFEND);
     }
 
-    private void addFactionCard(GuiElement root, int x, int y, int cardW,
+    private void addFactionCard(GuiElement root, int x, int y, int cardW, int cardH,
                                 ResourceLocation texture, int texW, int texH,
-                                String factionName, int textColor) {
-        AspectFit.Size fitted = AspectFit.within(texW, texH, IMG_MAX_W, IMG_MAX_H);
+                                String factionName, int accent) {
+        root.addChild(EspetroAuiWidgets.cardAccent(x, y, cardW, cardH, accent));
+        int imageH = Math.max(1, cardH - 22);
+        AspectFit.Size fitted = AspectFit.within(texW, texH, Math.max(1, cardW - 8), imageH);
         int imgX = x + (cardW - fitted.width()) / 2;
-        int imgY = y + (IMG_MAX_H - fitted.height()) / 2;
+        int imgY = y + (imageH - fitted.height()) / 2;
         root.addChild(new FactionImageElement(imgX, imgY, fitted.width(), fitted.height(),
             texW, texH, texture));
-        root.addChild(EspetroMutilWidgets.centeredText(x, y + IMG_MAX_H + 5, cardW,
-            fitText("\u00a7l" + factionName, cardW - 8), textColor));
+        EspetroAuiWidgets.Text label = EspetroAuiWidgets.centeredText(x, y + imageH + 4, cardW,
+            fitText(factionName, cardW - 8), accent);
+        label.setTextScale(UiTheme.TYPE_HEADING).setShadow(true);
+        root.addChild(label);
     }
 
     /** Draws the complete texture at an aspect-fitted size without cropping or stretching. */
@@ -196,16 +177,17 @@ public class FactionRevealScreen extends MutilScreen {
             int bx = refX + getX();
             int by = refY + getY();
             graphics.blit(texture, bx, by, dispW, dispH, 0, 0, texW, texH, texW, texH);
+
         }
     }
 
     private String fitText(String text, int maxWidth) {
         Minecraft mc = Minecraft.getInstance();
-        if (mc.font.width(EspetroMutilWidgets.stripFormatting(text)) <= maxWidth) {
+        if (mc.font.width(EspetroAuiWidgets.stripFormatting(text)) <= maxWidth) {
             return text;
         }
 
-        String plain = EspetroMutilWidgets.stripFormatting(text);
+        String plain = EspetroAuiWidgets.stripFormatting(text);
         return mc.font.plainSubstrByWidth(plain, Math.max(0, maxWidth - mc.font.width("..."))) + "...";
     }
 
@@ -219,8 +201,10 @@ public class FactionRevealScreen extends MutilScreen {
     }
 
     @Override
-    protected void renderBeforeMutil(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
-        EspetroMutilWidgets.drawScreenShade(graphics, this.width, this.height);
+    protected void renderBeforeMenu(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
+        // 与地图投票/地图揭晓同一套背景：当前地图预览图铺满屏幕再压暗。
+        CurrentMapBackgroundRenderer.render(
+            graphics, this.width, this.height, ClientGameState.getCurrentMapFolder());
     }
 
     @Override
@@ -228,10 +212,10 @@ public class FactionRevealScreen extends MutilScreen {
         super.tick();
         ticksRemaining--;
         if (ticksRemaining % 20 == 0 && phaseHeader != null) {
-            phaseHeader.setDetail("\u00a78" + getSecondsRemaining() + "秒后进入部署");
+            phaseHeader.setDetail(getSecondsRemaining() + " 秒后进入部署");
         }
         if (ticksRemaining <= 0 && Minecraft.getInstance().screen == this && !tutorialPreviewMode) {
-            Minecraft.getInstance().setScreen(null);
+            org.espetro.client.aui.AuiScreen.closeWithFade(this);
         }
     }
 

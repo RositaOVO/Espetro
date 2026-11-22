@@ -5,6 +5,8 @@ import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.network.chat.Component;
 import net.minecraftforge.fml.ModList;
 import org.espetro.Espetro;
+import org.espetro.client.gui.UiPaint;
+import org.espetro.client.gui.UiTheme;
 
 import java.lang.reflect.Method;
 
@@ -23,6 +25,7 @@ public final class HcrTacticalMapBridge {
     private static Method decreaseRenderRangeMethod;
     private static Method setSelectedDeploymentPointMethod;
     private static Method clearSelectedDeploymentPointMethod;
+    private static Method hideMinimapMethod;
     private static Object hudInstance;
     private static Boolean espointsLoaded;
     private static boolean unavailableLogged;
@@ -70,6 +73,18 @@ public final class HcrTacticalMapBridge {
             setSelectedDeploymentPointMethod().invoke(getHudInstance(), x, z);
         } catch (Throwable e) {
             logUnavailable(e);
+        }
+    }
+
+    /** 关闭 V 键小地图（J 菜单打开时调用）。 */
+    public static void hideMinimap() {
+        if (!isAvailable()) {
+            return;
+        }
+        try {
+            hideMinimapMethod().invoke(getHudInstance());
+        } catch (ReflectiveOperationException error) {
+            logUnavailable(error);
         }
     }
 
@@ -158,6 +173,13 @@ public final class HcrTacticalMapBridge {
         return setSelectedDeploymentPointMethod;
     }
 
+    private static Method hideMinimapMethod() throws ReflectiveOperationException {
+        if (hideMinimapMethod == null) {
+            hideMinimapMethod = hudClass().getMethod("hideMinimap");
+        }
+        return hideMinimapMethod;
+    }
+
     private static Method clearSelectedDeploymentPointMethod() throws ReflectiveOperationException {
         if (clearSelectedDeploymentPointMethod == null) {
             clearSelectedDeploymentPointMethod = hudClass().getMethod("clearSelectedDeploymentPoint");
@@ -166,17 +188,16 @@ public final class HcrTacticalMapBridge {
     }
 
     private static void renderFallback(GuiGraphics graphics, int x, int y, int width, int height) {
-        graphics.fill(x, y, x + width, y + height, 0xCC202020);
-        graphics.renderOutline(x, y, width, height, 0xFF000000);
+        UiPaint.sunken(graphics, x, y, width, height, UiTheme.RADIUS_INNER);
 
-        String text = "\u00a77战术地图不可用";
+        String text = "战术地图不可用";
         int textWidth = Minecraft.getInstance().font.width(text);
         graphics.drawString(
             Minecraft.getInstance().font,
             Component.literal(text),
             x + (width - textWidth) / 2,
             y + (height - 8) / 2,
-            0xAAAAAA,
+            UiTheme.TEXT_THIRD,
             false
         );
     }

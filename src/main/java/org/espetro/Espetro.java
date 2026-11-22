@@ -18,7 +18,7 @@ import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.EntityJoinLevelEvent;
 import net.minecraftforge.event.entity.item.ItemTossEvent;
 import net.minecraftforge.event.entity.living.LivingDropsEvent;
-import net.minecraftforge.event.entity.living.LivingEvent;
+
 import net.minecraftforge.event.entity.living.LivingHurtEvent;
 import net.minecraftforge.event.entity.player.PlayerEvent;
 import net.minecraftforge.event.server.ServerAboutToStartEvent;
@@ -38,7 +38,7 @@ import org.espetro.kubejs.EspetroKubeJSDefaultScripts;
 import org.espetro.network.NetworkManager;
 import org.espetro.runtime.ServerRuntimeMaintenance;
 import org.espetro.config.GameConfig;
-import org.espetro.stamina.StaminaManager;
+
 import org.espetro.team.TeamManager;
 import org.espetro.team.TeamPackManager;
 import org.espetro.logistics.LogisticsConfig;
@@ -78,6 +78,24 @@ public class Espetro {
     public static final String MOD_ID = "espetro";
     public static final Logger LOGGER = LoggerFactory.getLogger(Espetro.class);
 
+    /** 启动视频音频：必须注册进 SOUND_EVENT，否则 SoundManager 查不到事件（播放静默失败）。 */
+    public static final net.minecraftforge.registries.DeferredRegister<net.minecraft.sounds.SoundEvent> SOUND_EVENTS =
+        net.minecraftforge.registries.DeferredRegister.create(
+            net.minecraft.core.registries.Registries.SOUND_EVENT, MOD_ID);
+    public static final net.minecraftforge.registries.RegistryObject<net.minecraft.sounds.SoundEvent> SPLASH_AUDIO =
+        SOUND_EVENTS.register("splash_audio", () -> net.minecraft.sounds.SoundEvent.createVariableRangeEvent(
+            new net.minecraft.resources.ResourceLocation(MOD_ID, "splash_audio")));
+    // 诊断用：四种 sounds.json 写法各注册一个事件，用来定位哪种写法能被 SoundManager 收录
+    public static final net.minecraftforge.registries.RegistryObject<net.minecraft.sounds.SoundEvent> SPLASH_A =
+        SOUND_EVENTS.register("splash_a", () -> net.minecraft.sounds.SoundEvent.createVariableRangeEvent(
+            new net.minecraft.resources.ResourceLocation(MOD_ID, "splash_a")));
+    public static final net.minecraftforge.registries.RegistryObject<net.minecraft.sounds.SoundEvent> SPLASH_B =
+        SOUND_EVENTS.register("splash_b", () -> net.minecraft.sounds.SoundEvent.createVariableRangeEvent(
+            new net.minecraft.resources.ResourceLocation(MOD_ID, "splash_b")));
+    public static final net.minecraftforge.registries.RegistryObject<net.minecraft.sounds.SoundEvent> SPLASH_C =
+        SOUND_EVENTS.register("splash_c", () -> net.minecraft.sounds.SoundEvent.createVariableRangeEvent(
+            new net.minecraft.resources.ResourceLocation(MOD_ID, "splash_c")));
+
     private static MinecraftServer serverInstance;
 
     // 快捷键 (客户端专用，使用 Object 类型避免服务端加载问题)
@@ -85,9 +103,17 @@ public class Espetro {
     public static Object KEY_CLASS;  // J - 职业选择
     public static Object KEY_SKILL;  // Y - 指挥官技能
     public static Object KEY_RADIAL; // 长按战术交互轮盘
+    public static Object KEY_FORT_ROTATE; // R - 工事预览顺时针旋转 90°
 
     public Espetro() {
         ensureKubeJSDefaultScriptsIfLoaded();
+        SOUND_EVENTS.register(net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext.get().getModEventBus());
+        org.espetro.debug.EspetroDebugRules.register();
+        // SERVER 类型（而非 COMMON）：载具交互/白名单在客户端也有一半判定，
+        // 必须由服务端统一下发，避免两边 toml 不一致导致"客户端读条、服务端已放行"。
+        net.minecraftforge.fml.ModLoadingContext.get().registerConfig(
+            net.minecraftforge.fml.config.ModConfig.Type.SERVER,
+            org.espetro.vehicle.VehicleInteractionConfig.SPEC);
 
         // 客户端初始化：双重 lambda 确保服务端不加载客户端类
         DistExecutor.unsafeRunWhenOn(Dist.CLIENT, () -> () -> {
@@ -215,6 +241,7 @@ public class Espetro {
         public static void commonSetup(FMLCommonSetupEvent event) {
             event.enqueueWork(() -> {
                 ensureKubeJSDefaultScriptsIfLoaded();
+                org.espetro.debug.EspetroDebugRules.register();
                 NetworkManager.registerNetwork();
                 // 初始化职业人数管理器
                 new ClassCountManager();
@@ -289,11 +316,14 @@ public class Espetro {
             if (event.getEntity() instanceof net.minecraft.server.level.ServerPlayer serverPlayer) {
                 // 先强制主城再清背包/阶段逻辑，避免登录瞬间仍停在战场维度
                 GameStateManager.getInstance().forcePlayerToHub(serverPlayer);
-                StaminaManager.resetPlayer(serverPlayer);
                 clearPlayerInventory(serverPlayer);
 
                 GamePhase phase = GameStateManager.getInstance().getCurrentPhase();
                 GameStateManager.getInstance().onPlayerJoin(serverPlayer);
+                // 同步碰撞体积显示策略（F3+B）
+                org.espetro.network.HitboxPolicyController.syncToPlayer(serverPlayer);
+                // 同步"本机玩家是否为医疗兵"（倒地队友标识的渲染开关）
+                NetworkManager.sendMedicFlag(serverPlayer);
                 NetworkManager.NET.send(
                     net.minecraftforge.network.PacketDistributor.PLAYER.with(() -> serverPlayer),
                     org.espetro.network.FortificationCatalogPacket.forPlayer(serverPlayer));
@@ -312,7 +342,6 @@ public class Espetro {
             if (event.getEntity() instanceof ServerPlayer serverPlayer) {
                 // 退服前强制写回主城坐标与重生点（主城维度不重置）
                 GameStateManager.getInstance().forcePlayerToHub(serverPlayer);
-                StaminaManager.removePlayer(serverPlayer.getUUID());
                 org.espetro.network.VehicleSupplyActionPacket.clearPlayerRateLimit(
                     serverPlayer.getUUID());
                 org.espetro.bastion.FortificationManager.getInstance()
@@ -482,7 +511,6 @@ public class Espetro {
             VehicleManager.getInstance().clearRuntimeState();
             ServerRuntimeMaintenance.getInstance().reset();
             BattlefieldWorldManager.getInstance().resetAfterServerStop();
-            StaminaManager.clear();
             org.espetro.network.VehicleSupplyActionPacket.clearRateLimits();
             serverInstance = null;
         }
@@ -490,7 +518,6 @@ public class Espetro {
         @SubscribeEvent
         public static void onPlayerRespawn(PlayerEvent.PlayerRespawnEvent event) {
             if (event.getEntity() instanceof ServerPlayer serverPlayer) {
-                StaminaManager.resetPlayer(serverPlayer);
                 // 主城重生：所有人先冒险；非管理员再强制锁定
                 GameStateManager.getInstance().applyHubAdventureOnEnter(serverPlayer);
                 GameStateManager.getInstance().enforceHubAdventure(serverPlayer);
@@ -542,14 +569,6 @@ public class Espetro {
                     // 低频兜底：非管理员主城被其它途径改模式时拉回冒险
                     GameStateManager.getInstance().enforceHubAdventure(serverPlayer);
                 }
-                StaminaManager.onPlayerTick(serverPlayer);
-            }
-        }
-
-        @SubscribeEvent
-        public static void onPlayerJump(LivingEvent.LivingJumpEvent event) {
-            if (event.getEntity() instanceof ServerPlayer serverPlayer) {
-                StaminaManager.onPlayerJump(serverPlayer);
             }
         }
 

@@ -1,9 +1,10 @@
 package org.espetro.client.gui;
 
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.network.chat.Component;
 import org.espetro.network.VehicleDeployScreenPacket;
-import se.mickelus.mutil.gui.GuiElement;
+import org.espetro.client.aui.GuiElement;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -12,7 +13,7 @@ import java.util.Objects;
 /**
  * 载具部署界面：结构不变时原地刷新冷却/在场数，避免整页 rebuild 闪烁。
  */
-public class VehicleDeployScreen extends MutilScreen {
+public class VehicleDeployScreen extends EspetroMenuScreen {
 
     private static final int PANEL_WIDTH = 560;
     private static final int PANEL_MIN_WIDTH = 300;
@@ -23,26 +24,9 @@ public class VehicleDeployScreen extends MutilScreen {
     private static final int ROW_GAP = 6;
     private static final int SCROLLBAR_RESERVED_W = 8;
 
-    private static final int PANEL_BG = 0xB014171E;
-    private static final int ROW_READY = 0x80303D32;
-    private static final int ROW_READY_HOVER = 0xA03B4F3A;
-    private static final int ROW_BLOCKED = 0x7040444A;
-    private static final int ROW_BORDER = 0x704E5360;
-
     private List<VehicleDeployScreenPacket.VehicleInfo> vehicles;
-    private final List<RowBinding> rowBindings = new ArrayList<>();
+    private final List<VehicleRow> vehicleRows = new ArrayList<>();
     private Object structureSignature;
-
-    private static final class RowBinding {
-        private final EspetroMutilWidgets.ActionButton button;
-        private VehicleDeployScreenPacket.VehicleInfo info;
-
-        private RowBinding(EspetroMutilWidgets.ActionButton button,
-                           VehicleDeployScreenPacket.VehicleInfo info) {
-            this.button = button;
-            this.info = info;
-        }
-    }
 
     public VehicleDeployScreen(List<VehicleDeployScreenPacket.VehicleInfo> vehicles) {
         super(Component.literal("载具信息"));
@@ -58,12 +42,12 @@ public class VehicleDeployScreen extends MutilScreen {
         this.vehicles = list;
         if (!Objects.equals(structureSignature, sig)) {
             structureSignature = sig;
-            rebuildMutilRoot();
+            rebuildMenuRoot();
         } else {
-            for (int i = 0; i < rowBindings.size() && i < list.size(); i++) {
-                rowBindings.get(i).info = list.get(i);
+            // 冷却/在场数由行内每帧读取，这里只把新数据挂回已有行。
+            for (int i = 0; i < vehicleRows.size() && i < list.size(); i++) {
+                vehicleRows.get(i).info = list.get(i);
             }
-            refreshRows();
         }
     }
 
@@ -76,8 +60,8 @@ public class VehicleDeployScreen extends MutilScreen {
     }
 
     @Override
-    protected void buildMutilRoot(GuiElement root) {
-        rowBindings.clear();
+    protected void buildMenuRoot(GuiElement root) {
+        vehicleRows.clear();
         int panelW = Math.min(PANEL_WIDTH, Math.max(PANEL_MIN_WIDTH, this.width - PANEL_MARGIN * 2));
         int listContentH = vehicles.isEmpty()
             ? ROW_H
@@ -88,89 +72,52 @@ public class VehicleDeployScreen extends MutilScreen {
         int panelX = (this.width - panelW) / 2;
         int panelY = Math.max(8, (this.height - panelH) / 2 - 18);
 
-        root.addChild(EspetroMutilWidgets.panel(panelX, panelY, panelW, panelH, PANEL_BG, EspetroMutilWidgets.BORDER));
-        root.addChild(EspetroMutilWidgets.centeredText(
-            panelX, panelY + 12, panelW, "\u00a76\u00a7l载具信息", EspetroMutilWidgets.GOLD));
-        root.addChild(EspetroMutilWidgets.centeredText(
-            panelX, panelY + 29, panelW, "\u00a77冷却与在场数量实时更新", EspetroMutilWidgets.MUTED));
-        root.addChild(EspetroMutilWidgets.rect(
-            panelX + PANEL_PADDING, panelY + HEADER_H - 3, panelW - PANEL_PADDING * 2, 1, 0x35FFFFFF));
+        root.addChild(EspetroAuiWidgets.card(panelX, panelY, panelW, panelH));
+
+        EspetroAuiWidgets.Text title = EspetroAuiWidgets.centeredText(
+            panelX, panelY + 8, panelW, "载具信息", UiTheme.GOLD);
+        title.setTextScale(UiTheme.TYPE_TITLE).setShadow(true);
+        root.addChild(title);
+        root.addChild(EspetroAuiWidgets.stat(panelX + panelW - 76, panelY + 6, 64,
+            "VEHICLES", String.valueOf(vehicles.size()), UiTheme.TEXT));
+        root.addChild(EspetroAuiWidgets.centeredText(
+            panelX, panelY + 25, panelW, "冷却与在场数量实时更新", UiTheme.TEXT_THIRD)
+            .setTextScale(UiTheme.TYPE_MICRO));
+        root.addChild(EspetroAuiWidgets.divider(
+            panelX + PANEL_PADDING, panelY + HEADER_H - 8, panelW - PANEL_PADDING * 2));
 
         int listX = panelX + PANEL_PADDING;
         int listY = panelY + HEADER_H + PANEL_PADDING;
         int listW = panelW - PANEL_PADDING * 2;
+        // 列表底：内凹槽位，把可滚动列表与卡片底区分开。
+        root.addChild(EspetroAuiWidgets.sunken(listX - 2, listY - 2, listW + 4, listH + 4));
         ScrollableList list = new ScrollableList(listX, listY, listW, listH)
             .setScrollStep(ROW_H + ROW_GAP)
             .setAlwaysShowScrollbar(true);
         root.addChild(list);
 
         if (vehicles.isEmpty()) {
-            list.addChild(vehicleButton(0, 0, listW, "\u00a7c当前编制无载具配置", false, null));
+            list.addChild(new VehicleRow(0, 0, listW - SCROLLBAR_RESERVED_W, ROW_H, null));
             return;
         }
 
         int y = 0;
         for (VehicleDeployScreenPacket.VehicleInfo vehicle : vehicles) {
-            int remaining = computeRemainingSeconds(vehicle);
-            String label = buildVehicleLabel(vehicle, remaining, false);
-            var btn = vehicleButton(0, y, listW, label, false, null);
-            list.addChild(btn);
-            rowBindings.add(new RowBinding(btn, vehicle));
+            VehicleRow row = new VehicleRow(0, y, listW - SCROLLBAR_RESERVED_W, ROW_H, vehicle);
+            list.addChild(row);
+            vehicleRows.add(row);
             y += ROW_H + ROW_GAP;
         }
     }
 
-    private void refreshRows() {
-        for (RowBinding row : rowBindings) {
-            int remaining = computeRemainingSeconds(row.info);
-            row.button.setLabel(buildVehicleLabel(row.info, remaining, false));
-            row.button.setEnabled(false);
-        }
-    }
-
-    private int computeRemainingSeconds(VehicleDeployScreenPacket.VehicleInfo vehicle) {
+    private static int computeRemainingSeconds(VehicleDeployScreenPacket.VehicleInfo vehicle) {
         long remaining = Math.max(0L, vehicle.readyAtEpochMs - System.currentTimeMillis());
         return (int) Math.min(Integer.MAX_VALUE, (remaining + 999L) / 1000L);
     }
 
-    private EspetroMutilWidgets.ActionButton vehicleButton(
-        int x, int y, int width, String label, boolean enabled, Runnable action
-    ) {
-        return EspetroMutilWidgets.button(x, y, width - SCROLLBAR_RESERVED_W, ROW_H, label, action)
-            .setEnabled(enabled)
-            .setColors(ROW_READY, ROW_READY_HOVER, ROW_READY_HOVER)
-            .setDisabledColor(ROW_BLOCKED)
-            .setBorderColor(ROW_BORDER)
-            .setTextColor(enabled ? EspetroMutilWidgets.TEXT : EspetroMutilWidgets.DIM);
-    }
-
-    private static String buildVehicleLabel(VehicleDeployScreenPacket.VehicleInfo vehicle,
-                                            int remaining, boolean enabled) {
-        String status;
-        if (remaining > 0) {
-            status = "\u00a7c冷却 " + remaining + "秒";
-        } else if (vehicle.current >= vehicle.max) {
-            status = "\u00a76已满 " + vehicle.current + "/" + vehicle.max;
-        } else {
-            status = "\u00a7a就绪 " + vehicle.current + "/" + vehicle.max;
-        }
-        String nameColor = remaining > 0 || vehicle.current >= vehicle.max
-            ? "\u00a78" : "\u00a7e";
-        return nameColor + vehicle.displayName + "  " + status
-            + "  \u00a77(" + vehicle.respawnMinutes + "分钟刷新)";
-    }
-
     @Override
-    public void tick() {
-        super.tick();
-        if (onceEverySecond()) {
-            refreshRows();
-        }
-    }
-
-    @Override
-    protected void renderBeforeMutil(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
-        EspetroMutilWidgets.drawScreenShade(graphics, this.width, this.height);
+    protected void renderBeforeMenu(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
+        EspetroAuiWidgets.drawScreenShade(graphics, this.width, this.height);
     }
 
     @Override
@@ -181,5 +128,71 @@ public class VehicleDeployScreen extends MutilScreen {
     @Override
     public boolean isPauseScreen() {
         return false;
+    }
+
+    /**
+     * 单行载具信息：纯展示行（原为始终禁用的按钮），
+     * 名称 + 冷却/就绪状态 chip + 在场/上限数字。
+     */
+    private static final class VehicleRow extends GuiElement {
+        private VehicleDeployScreenPacket.VehicleInfo info;
+
+        VehicleRow(int x, int y, int width, int height,
+                   VehicleDeployScreenPacket.VehicleInfo info) {
+            super(x, y, width, height);
+            this.info = info;
+        }
+
+        @Override
+        public void draw(GuiGraphics graphics, int x, int y, int width, int height,
+                         int mouseX, int mouseY, float partialTick) {
+            if (!isVisible()) return;
+            int bx = x + getX();
+            int by = y + getY();
+            int bw = getWidth();
+            int bh = getHeight();
+
+            UiPaint.glassPanel(graphics, bx, by, bw, bh, UiTheme.CONTROL_NORMAL);
+
+            if (info == null) {
+                EspetroAuiWidgets.drawScaledString(graphics, "当前编制无载具配置",
+                    bx + 10, by + 10, UiTheme.TEXT_THIRD, 1.0f);
+                return;
+            }
+
+            int remaining = computeRemainingSeconds(info);
+            boolean full = info.current >= info.max;
+            int stateColor = remaining > 0 ? UiTheme.WARNING
+                : full ? UiTheme.NEGATIVE : UiTheme.POSITIVE;
+            String stateText = remaining > 0
+                ? "冷却 " + UnifiedDeployScreen.formatCooldown(remaining)
+                : full ? "已满" : "就绪";
+            UiPaint.accentBarLeft(graphics, bx, by, bh, stateColor);
+
+            int nameColor = remaining > 0 || full ? UiTheme.TEXT_SECOND : UiTheme.TEXT;
+            EspetroAuiWidgets.drawScaledString(graphics, info.displayName,
+                bx + 10, by + 5, nameColor, 1.0f);
+            EspetroAuiWidgets.drawScaledString(graphics, info.respawnMinutes + "分钟刷新",
+                bx + 10, by + 18, UiTheme.TEXT_THIRD, 0.8f);
+
+            // 冷却/满员状态以文字和低饱和语义底色表示。
+            float chipScale = 0.85f;
+            int chipTextW = (int) (Minecraft.getInstance().font.width(stateText) * chipScale);
+            int chipW = Math.max(24, chipTextW + 12);
+            int chipH = 13;
+            int chipX = bx + bw - chipW - 8;
+            int chipY = by + (bh - chipH) / 2;
+            UiPaint.roundRect(graphics, chipX, chipY, chipW, chipH, UiTheme.RADIUS_CONTROL,
+                UiTheme.alpha(stateColor, 0.14f));
+
+            EspetroAuiWidgets.drawScaledString(graphics, stateText,
+                chipX + (chipW - chipTextW) / 2, chipY + 3, stateColor, chipScale);
+
+            // 在场/上限：右对齐数字，带阴影提升可读性。
+            String count = info.current + "/" + info.max;
+            int countW = (int) (Minecraft.getInstance().font.width(count) * 1.15f);
+            EspetroAuiWidgets.drawScaledString(graphics, count, chipX - countW - 10, by + 9,
+                UiTheme.TEXT_SECOND, 1.15f, true);
+        }
     }
 }

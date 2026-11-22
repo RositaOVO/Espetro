@@ -1,6 +1,5 @@
 package org.espetro.client.gui;
 
-import com.mojang.blaze3d.systems.RenderSystem;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.AttackIndicatorStatus;
 import net.minecraft.client.Minecraft;
@@ -18,10 +17,9 @@ import net.minecraftforge.client.event.RenderGuiOverlayEvent;
 import net.minecraftforge.client.extensions.common.IClientItemExtensions;
 import net.minecraftforge.client.gui.overlay.VanillaGuiOverlay;
 import net.minecraftforge.event.TickEvent;
-import se.mickelus.mutil.gui.GuiElement;
+import org.espetro.client.gui.UiTheme;
 
 public final class VanillaHudLayout {
-    private static final ResourceLocation WIDGETS_LOCATION = ResourceLocation.withDefaultNamespace("textures/gui/widgets.png");
     private static final ResourceLocation GUI_ICONS_LOCATION = ResourceLocation.withDefaultNamespace("textures/gui/icons.png");
 
     private static final float HOTBAR_SCALE = 0.82F;
@@ -251,17 +249,7 @@ public final class VanillaHudLayout {
 
     private static boolean renderRightHotbar(GuiGraphics graphics, Minecraft mc, float partialTick,
                                              int screenWidth, int screenHeight) {
-        boolean[] rendered = {false};
-        GuiElement element = new GuiElement(0, 0, screenWidth, screenHeight) {
-            @Override
-            public void draw(GuiGraphics gui, int x, int y, int width, int height,
-                             int mouseX, int mouseY, float tick) {
-                rendered[0] = drawRightHotbar(gui, mc, partialTick, screenWidth, screenHeight);
-                super.draw(gui, x, y, width, height, mouseX, mouseY, tick);
-            }
-        };
-        element.draw(graphics, 0, 0, screenWidth, screenHeight, -1, -1, partialTick);
-        return rendered[0];
+        return drawRightHotbar(graphics, mc, partialTick, screenWidth, screenHeight);
     }
 
     private static boolean drawRightHotbar(GuiGraphics graphics, Minecraft mc, float partialTick,
@@ -290,8 +278,7 @@ public final class VanillaHudLayout {
         int baseX = Mth.floor(localScreenWidth - HOTBAR_RIGHT_MARGIN / HOTBAR_SCALE - SLOT_SIZE);
         int baseY = Mth.floor(Math.max(8.0F / HOTBAR_SCALE, (localScreenHeight - totalHeight) / 2.0F));
 
-        RenderSystem.enableBlend();
-        RenderSystem.defaultBlendFunc();
+        HudRenderState.begin(graphics);
 
         graphics.pose().pushPose();
         graphics.pose().scale(HOTBAR_SCALE, HOTBAR_SCALE, 1.0F);
@@ -300,11 +287,13 @@ public final class VanillaHudLayout {
 
         for (int slot = 0; slot < HOTBAR_SLOTS; slot++) {
             int slotY = baseY + slot * SLOT_STEP;
-            graphics.blit(WIDGETS_LOCATION, baseX, slotY, 0, 0, SLOT_SIZE, SLOT_SIZE);
+            UiPaint.roundRect(graphics, baseX, slotY, SLOT_SIZE, SLOT_SIZE,
+                UiTheme.RADIUS_CONTROL, UiTheme.CONTROL_NORMAL);
         }
 
         int selectedY = baseY + player.getInventory().selected * SLOT_STEP;
-        graphics.blit(WIDGETS_LOCATION, baseX - 1, selectedY - 1, 0, 22, 24, 22);
+        UiPaint.roundRect(graphics, baseX, selectedY, SLOT_SIZE, SLOT_SIZE,
+            UiTheme.RADIUS_CONTROL, UiTheme.CONTROL_SELECTED);
 
         int seed = 1;
         for (int slot = 0; slot < HOTBAR_SLOTS; slot++) {
@@ -315,7 +304,8 @@ public final class VanillaHudLayout {
 
         if (!offhand.isEmpty()) {
             int offhandY = baseY + SLOT_SIZE + (HOTBAR_SLOTS - 1) * SLOT_STEP + OFFHAND_GAP;
-            graphics.blit(WIDGETS_LOCATION, baseX, offhandY, 0, 0, SLOT_SIZE, SLOT_SIZE);
+            UiPaint.roundRect(graphics, baseX, offhandY, SLOT_SIZE, SLOT_SIZE,
+                UiTheme.RADIUS_CONTROL, UiTheme.CONTROL_NORMAL);
             renderSlot(graphics, mc, player, offhand, baseX + 3, offhandY + 3, partialTick, seed);
         }
 
@@ -324,7 +314,7 @@ public final class VanillaHudLayout {
 
         graphics.setColor(1.0F, 1.0F, 1.0F, 1.0F);
         graphics.pose().popPose();
-        RenderSystem.disableBlend();
+        HudRenderState.restore(graphics);
         return true;
     }
 
@@ -395,20 +385,12 @@ public final class VanillaHudLayout {
         int textY = VanillaHudNameLayout.nameY(slotY);
         graphics.fill(textX - 2, textY - 2, textX + textWidth + 2, textY + 9 + 2,
             VanillaHudNameLayout.nameBackgroundColor(fade));
-        graphics.drawString(font, tip, textX, textY, 0xFFFFFF | fade << 24, true);
+        graphics.drawString(font, tip, textX, textY, UiTheme.withAlpha(UiTheme.WORLD_TEXT, fade), true);
     }
 
     private static void renderHealthLine(GuiGraphics graphics, Minecraft mc,
                                          int screenWidth, int screenHeight) {
-        GuiElement element = new GuiElement(0, 0, screenWidth, screenHeight) {
-            @Override
-            public void draw(GuiGraphics gui, int x, int y, int width, int height,
-                             int mouseX, int mouseY, float partialTick) {
-                drawHealthLine(gui, mc, screenWidth, screenHeight);
-                super.draw(gui, x, y, width, height, mouseX, mouseY, partialTick);
-            }
-        };
-        element.draw(graphics, 0, 0, screenWidth, screenHeight, -1, -1, 0.0F);
+        drawHealthLine(graphics, mc, screenWidth, screenHeight);
     }
 
     private static void drawHealthLine(GuiGraphics graphics, Minecraft mc,
@@ -431,15 +413,10 @@ public final class VanillaHudLayout {
             healthFilled = Math.max(1, healthFilled);
         }
 
-        RenderSystem.enableBlend();
-        RenderSystem.defaultBlendFunc();
-
         if (healthFilled > 0) {
-            graphics.fill(x, healthY, x + healthFilled, healthY + HEALTH_HEIGHT, 0xFFE33434);
-            graphics.fill(x, healthY, x + healthFilled, healthY + 2, 0xFFFF6B6B);
+            graphics.fill(x, healthY, x + healthFilled, healthY + HEALTH_HEIGHT, UiTheme.WORLD_NEGATIVE);
         }
-
-        RenderSystem.disableBlend();
+        HudRenderState.restore(graphics);
     }
 
     private static boolean shouldReplaceSurvivalBars(Minecraft mc) {

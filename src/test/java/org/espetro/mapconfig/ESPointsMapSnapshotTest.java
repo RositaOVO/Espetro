@@ -50,23 +50,20 @@ class ESPointsMapSnapshotTest {
     }
 
     @Test
-    void rejectsMalformedCapturePlan(@TempDir Path dir) throws Exception {
+    void rejectsRandomObjectiveMode(@TempDir Path dir) throws Exception {
         writeTactical(dir, "");
         Files.writeString(dir.resolve("CapturePoints.json"), """
             {
-              "totalBatches":1,
-              "endBehavior":"terminate",
-              "teamReinforcements":{"ATTACK":280,"DEFEND":1200},
+              "objectiveMode":"RANDOM",
               "plannedPoints":[
-                {"name":"A","batch":1,"pos1":[0,60,0],"pos2":[4,70,4]},
-                {"name":"A","batch":1,"pos1":[8,60,8],"pos2":[12,70,12]}
+                {"name":"A","batch":1,"pos1":[0,60,0],"pos2":[4,70,4]}
               ]
             }
             """, StandardCharsets.UTF_8);
 
-        IllegalArgumentException duplicate = assertThrows(IllegalArgumentException.class,
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
             () -> ESPointsMapSnapshot.load(dir));
-        assertTrue(duplicate.getMessage().contains("重复据点"));
+        assertTrue(error.getMessage().contains("AAS") || error.getMessage().contains("RAAS"));
     }
 
     @Test
@@ -95,6 +92,39 @@ class ESPointsMapSnapshotTest {
         ESPointsMapSnapshot snapshot = ESPointsMapSnapshot.load(dir);
         assertFalse(snapshot.hasBackground());
         assertEquals(0, snapshot.backgroundBytes().length);
+    }
+
+    @Test
+    void stampsSeedWithoutSelectingCaptureRoute(@TempDir Path dir) throws Exception {
+        writeTactical(dir, "");
+        String rawCapture = """
+            {
+              "objectiveMode":"RAAS",
+              "endBehavior":"terminate",
+              "teamReinforcements":{"ATTACK":280,"DEFEND":1200},
+              "raas":{
+                "points":[
+                  {"id":"main","pos1":[0,60,0],"pos2":[4,70,4]},
+                  {"id":"north","pos1":[8,60,0],"pos2":[12,70,4]},
+                  {"id":"south","pos1":[8,60,8],"pos2":[12,70,12]},
+                  {"id":"terminal","pos1":[16,60,0],"pos2":[20,70,4]}
+                ],
+                "lanes":[
+                  {"id":"east","stages":[["main"],["north","south"],["terminal"]]}
+                ]
+              }
+            }
+            """;
+        Files.writeString(dir.resolve("CapturePoints.json"), rawCapture, StandardCharsets.UTF_8);
+
+        ESPointsMapSnapshot frozen = ESPointsMapSnapshot.load(dir);
+        ESPointsMapSnapshot round = frozen.forRound(17L);
+        assertEquals("RAAS", round.objectiveMode);
+        assertEquals("", round.objectiveLane);
+        assertEquals(17L, round.objectiveSeed);
+        // Raw JSON preserved — ESPoints selects the lane from EsConfig + seed.
+        assertTrue(round.capturePointsJson.contains("\"raas\""));
+        assertTrue(round.capturePointsJson.contains("objectiveMode"));
     }
 
     private static void writeValidFiles(Path dir, String background) throws Exception {

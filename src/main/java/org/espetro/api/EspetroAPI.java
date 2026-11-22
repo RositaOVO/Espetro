@@ -3,6 +3,7 @@ package org.espetro.api;
 import net.minecraft.server.level.ServerPlayer;
 import org.espetro.bastion.BastionData;
 import org.espetro.bastion.BastionManager;
+import org.espetro.bastion.FortificationManager;
 import org.espetro.Espetro;
 import org.espetro.team.CommanderSkillManager;
 import org.espetro.team.ClassCountManager;
@@ -100,6 +101,35 @@ public class EspetroAPI {
     }
 
     /**
+     * Notify Espetro that one whole capture-point batch has been completed.
+     *
+     * <p>用于抢滩登陆「前哨载具出生点」：地图在 {@code VehSpawn.json} 里用
+     * {@code outpost_spawn_points} + {@code outpost_activate_after_batch} 声明，
+     * 到达指定批次后由 {@link org.espetro.vehicle.OutpostSpawnGate} 放行。</p>
+     *
+     * @param batch         刚完成的批次号（从 1 开始）
+     * @param capturingTeam ATTACK / DEFEND
+     */
+    public static boolean onCaptureBatchCompleted(int batch, String capturingTeam) {
+        org.espetro.vehicle.OutpostSpawnGate.onBatchCompleted(batch);
+        net.minecraft.server.MinecraftServer server =
+            net.minecraftforge.server.ServerLifecycleHooks.getCurrentServer();
+        if (server == null) {
+            return false;
+        }
+        Optional<net.minecraft.server.level.ServerLevel> level = getActiveBattlefieldLevel(server);
+        if (level.isEmpty()) {
+            return false;
+        }
+        int spawned = org.espetro.vehicle.VehicleManager.getInstance()
+            .spawnOutpostSupplyStations(level.get(), capturingTeam);
+        org.espetro.Espetro.LOGGER.info(
+            "批次 {} 完成（{}），抢滩前哨载具点已启用，前哨坑补给站: {} 个",
+            batch, capturingTeam, spawned);
+        return true;
+    }
+
+    /**
      * Notify Espetro that an owned capture point has just become neutral.
      * Both values may use ATTACK/DEFEND or Espetro scoreboard team IDs. The
      * attacking value may be null; the old owner's opposing side is then used.
@@ -153,6 +183,13 @@ public class EspetroAPI {
 
     public static String getPlayerClass(UUID playerId) {
         return ClassCountManager.getInstance().getPlayerClass(playerId);
+    }
+
+    /** 该玩家当前职业是否配置为医疗兵（EsFactions 职业里的 {@code "med": true}）。 */
+    public static boolean isMedicPlayer(UUID playerId) {
+        String classId = getPlayerClass(playerId);
+        return classId != null && classId.length() > 0
+            && org.espetro.team.FactionDataProvider.getOrCreateLoader().isMedicClass(classId);
     }
 
     public static String getPlayerClassVariant(UUID playerId) {
@@ -257,6 +294,14 @@ public class EspetroAPI {
      * ESPoints 在服务端将战术地图选点转换为世界坐标后调用。
      * 这是通用指挥官技能选点入口；旧的 submitArtillerySupportTarget 保留为兼容别名。
      */
+    /** 徐进弹幕：提交直线起点与终点。 */
+    public static boolean submitCommanderBarrageTarget(ServerPlayer commander,
+                                                       double startX, double startZ,
+                                                       double endX, double endZ) {
+        return CommanderSkillManager.getInstance()
+            .submitBarrageTarget(commander, startX, startZ, endX, endZ);
+    }
+
     public static boolean submitCommanderSkillTarget(ServerPlayer commander, double x, double z) {
         return CommanderSkillManager.getInstance().submitArtillerySupportTarget(commander, x, z);
     }
@@ -375,6 +420,14 @@ public class EspetroAPI {
     }
 
     /**
+     * 返回战术地图使用的固定武器快照（{@code fixed_weapon.enabled} 的工事），
+     * 不遍历世界实体，也不会加载区块。
+     */
+    public static List<TacticalMapStateSnapshot.FixedWeaponSnapshot> getFixedWeapons() {
+        return getTacticalMapStateSnapshot().fixedWeapons();
+    }
+
+    /**
      * 返回战术地图使用的载具补给站快照，不遍历世界实体，也不会加载区块。
      */
     public static List<VehicleManager.SupplyStationSnapshot> getVehicleSupplyStations() {
@@ -432,11 +485,25 @@ public class EspetroAPI {
                     station.x(), station.y(), station.z()))
                 .sorted(java.util.Comparator.comparing(snapshot -> snapshot.id().toString()))
                 .toList();
+        // 固定武器：只含 fixed_weapon.enabled 的已建成工事，判定复用 FortificationManager。
+        List<TacticalMapStateSnapshot.FixedWeaponSnapshot> fixedWeapons =
+            FortificationManager.getInstance().placedFixedWeapons().stream()
+                .map(weapon -> new TacticalMapStateSnapshot.FixedWeaponSnapshot(
+                    // 短且稳定的客户端键：工事 id + 方块位置（维度由 dimension 字段承载）。
+                    // 这样即使 id 用满 128 字符也不会超出包内 128 字符上限。
+                    weapon.fortId() + "@" + weapon.pos().asLong(),
+                    weapon.fortId(), weapon.team(), weapon.dimension(),
+                    weapon.pos().getX(), weapon.pos().getY(), weapon.pos().getZ(),
+                    weapon.fortId(), weapon.mapIcon()))
+                .sorted(java.util.Comparator.comparing(
+                    TacticalMapStateSnapshot.FixedWeaponSnapshot::id))
+                .toList();
 
         tacticalSnapshotSession = session;
         tacticalRevision++;
         lastTacticalSnapshot = new TacticalMapStateSnapshot(
-            tacticalRevision, session, structures, rallies, teamBases, deployPoints, stations);
+            tacticalRevision, session, structures, rallies, teamBases, deployPoints, stations,
+            fixedWeapons);
         tacticalBuiltRevision = tacticalDirtyRevision;
         return lastTacticalSnapshot;
     }
@@ -473,18 +540,81 @@ public class EspetroAPI {
     }
 
     private static ActiveBattlefieldSnapshot toPublicSnapshot(ActiveMapConfig map) {
+        String esConfigPath = map.esConfigDir != null
+            ? map.esConfigDir.toAbsolutePath().normalize().toString()
+            : "";
         return new ActiveBattlefieldSnapshot(
             map.mapFolder,
             map.displayName,
             map.dimensionKey,
-            map.esPoints.tacticalMapJson,
-            map.esPoints.capturePointsJson,
-            map.esPoints.backgroundImage,
-            map.esPoints.backgroundBytes(),
-            map.esPoints.backgroundSha256,
-            map.esPoints.backgroundWidth,
-            map.esPoints.backgroundHeight
+            esConfigPath,
+            map.esPoints != null ? map.esPoints.tacticalMapJson : "",
+            map.esPoints != null ? map.esPoints.capturePointsJson : "",
+            map.esPoints != null ? map.esPoints.backgroundImage : "",
+            map.esPoints != null ? map.esPoints.backgroundBytes() : new byte[0],
+            map.esPoints != null ? map.esPoints.backgroundSha256 : "",
+            map.esPoints != null ? map.esPoints.backgroundWidth : 0,
+            map.esPoints != null ? map.esPoints.backgroundHeight : 0,
+            map.esPoints != null ? map.esPoints.objectiveMode : "",
+            map.esPoints != null ? map.esPoints.objectiveLane : "",
+            map.esPoints != null ? map.esPoints.objectiveSeed : 0L
         );
+    }
+
+    /** Player-facing team label (进攻方/阵营A …). */
+    public static String teamDisplayName(String team) {
+        return org.espetro.team.TeamDisplayNames.displayName(team);
+    }
+
+    public static boolean isSymmetricObjectiveMode() {
+        return org.espetro.team.TeamDisplayNames.isSymmetricMode();
+    }
+
+    /** Apply troop delta for ATTACK/DEFEND. Positive adds, negative subtracts. */
+    public static void modifyTeamTroops(String team, int delta, String reason) {
+        if (team == null) {
+            return;
+        }
+        var troops = org.espetro.team.TroopCountManager.getInstance();
+        if ("ATTACK".equalsIgnoreCase(team.trim())) {
+            troops.modifyAttackTroops(delta);
+        } else if ("DEFEND".equalsIgnoreCase(team.trim())) {
+            troops.modifyDefendTroops(delta);
+        }
+        if (reason != null && !reason.isBlank()) {
+            Espetro.LOGGER.info("[Troops] {} {} {:+d} ({})", team, reason, delta);
+        }
+    }
+
+    /**
+     * Objective victory from ESPoints. Broadcasts and records winner; stage
+     * machine may advance on next tick / existing cleanup hooks.
+     */
+    public static void notifyObjectiveVictory(String winnerTeam) {
+        String canonical = winnerTeam == null ? "" : winnerTeam.trim().toUpperCase();
+        if (!"ATTACK".equals(canonical) && !"DEFEND".equals(canonical)) {
+            Espetro.LOGGER.warn("ignore objective victory for unknown team: {}", winnerTeam);
+            return;
+        }
+        org.espetro.mapconfig.BattlefieldContext.setLastRoundWinner(canonical);
+        String winLabel = org.espetro.team.TeamDisplayNames.coloredDisplayName(canonical);
+        Espetro.broadcastToAll("§6§l[据点] §r" + winLabel + "§a 已达成占领目标！");
+        Espetro.LOGGER.info("ESPoints 据点胜利: {}", canonical);
+    }
+
+    /** Called by ESPoints after it resolves AAS/RAAS for the round. */
+    public static void setResolvedObjectiveMode(String mode, String laneId) {
+        org.espetro.mapconfig.BattlefieldContext.setResolvedObjective(
+            mode == null ? "" : mode, laneId == null ? "" : laneId);
+        // Re-broadcast current phase so clients refresh objectiveMode labels (阵营A/B).
+        try {
+            var gsm = org.espetro.team.GameStateManager.getInstance();
+            if (gsm != null) {
+                org.espetro.network.NetworkManager.broadcastGamePhase(gsm.getCurrentPhase());
+            }
+        } catch (Throwable t) {
+            Espetro.LOGGER.debug("objectiveMode 客户端同步跳过: {}", t.toString());
+        }
     }
 
     private static String getPlayerTeamById(UUID playerId) {

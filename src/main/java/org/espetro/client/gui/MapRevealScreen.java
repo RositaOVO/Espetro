@@ -1,0 +1,193 @@
+package org.espetro.client.gui;
+
+import com.mojang.blaze3d.platform.NativeImage;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.GuiGraphics;
+import net.minecraft.client.renderer.texture.DynamicTexture;
+import net.minecraft.network.chat.Component;
+import net.minecraft.resources.ResourceLocation;
+import org.espetro.client.aui.GuiElement;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.HashMap;
+import java.util.Map;
+
+/**
+ * 地图揭晓页：地图投票结束后显示胜出地图名称与预览图（图片居中，无图显示占位）。
+ */
+public class MapRevealScreen extends EspetroMenuScreen {
+
+    private static final int IMG_MAX_W = 640;
+    private static final int IMG_MAX_H = 360;
+
+    /** 预览图缓存：mapFolder → 纹理与源尺寸。 */
+    private static final Map<String, RevealTexture> TEXTURE_CACHE = new HashMap<>();
+
+    private record RevealTexture(ResourceLocation location, int texW, int texH) {
+    }
+
+    private final String mapDisplayName;
+    private final String mapFolder;
+    private int ticksLeft;
+    private boolean done;
+    private VotePhase phaseHeader;
+
+    public MapRevealScreen(String mapDisplayName, String mapFolder, int durationSeconds) {
+        super(Component.literal("地图揭晓"));
+        this.mapDisplayName = mapDisplayName == null || mapDisplayName.isBlank()
+            ? "未知地图" : mapDisplayName;
+        this.mapFolder = mapFolder == null ? "" : mapFolder;
+        this.ticksLeft = Math.max(1, durationSeconds) * 20;
+        resolveTexture();
+    }
+
+    /** 从客户端 EsWorld 目录加载预览图；失败时 UI 显示「暂无图片」。 */
+    private void resolveTexture() {
+        if (mapFolder.isEmpty() || TEXTURE_CACHE.containsKey(mapFolder)) return;
+        Minecraft mc = Minecraft.getInstance();
+        if (mc == null) return;
+        Path previewPath = MapVotePreviewResolver.resolve(mc.gameDirectory.toPath(), mapFolder);
+        if (previewPath == null) return;
+        try (InputStream in = Files.newInputStream(previewPath)) {
+            NativeImage image = NativeImage.read(in);
+            int w = image.getWidth();
+            int h = image.getHeight();
+            DynamicTexture texture = new DynamicTexture(image);
+            ResourceLocation rl = ResourceLocation.fromNamespaceAndPath(
+                "espetro", "map_reveal/" + Integer.toHexString(mapFolder.hashCode()));
+            mc.getTextureManager().register(rl, texture);
+            TEXTURE_CACHE.put(mapFolder, new RevealTexture(rl, w, h));
+        } catch (IOException | RuntimeException e) {
+            // 无预览图：占位显示
+        }
+    }
+
+    @Override
+    protected void renderBeforeMenu(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
+        // 与地图投票页同一套背景：当前选中/胜出地图的预览图铺满屏幕再压暗。
+        CurrentMapBackgroundRenderer.render(graphics, this.width, this.height, mapFolder);
+    }
+
+    @Override
+    protected void buildMenuRoot(GuiElement root) {
+        phaseHeader = VotePhase.add(root, width, height, "地图揭晓",
+            "胜出地图：" + mapDisplayName,
+            () -> getSecondsRemaining() + " 秒后进入装载", () -> VotePhase.Stage.MAP);
+        int headerH = VotePhase.contentTop(height);
+        int availableH = Math.max(1, VotePhase.contentBottom(height) - headerH - 36);
+        int availW = Math.max(1, Math.min(IMG_MAX_W, width - 48));
+        int availH = Math.max(1, Math.min(IMG_MAX_H, availableH));
+        RevealTexture tex = TEXTURE_CACHE.get(mapFolder);
+        int imgW;
+        int imgH;
+        if (tex != null) {
+            float scale = Math.min((float) availW / tex.texW(), (float) availH / tex.texH());
+            imgW = Math.max(1, Math.round(tex.texW() * scale));
+            imgH = Math.max(1, Math.round(tex.texH() * scale));
+            int imgX = (this.width - imgW) / 2;
+            int imgY = headerH + Math.max(0, (availableH - imgH) / 2 + 8);
+            root.addChild(new RevealImageElement(imgX, imgY, imgW, imgH, tex));
+            addMapTitle(root, imgY + imgH + 10);
+        } else {
+            // 无图占位：灰色方框 + 「暂无图片」
+            imgW = Math.min(availW, Math.max(1, availH * 16 / 9));
+            imgH = Math.max(1, imgW * 9 / 16);
+            int imgX = (this.width - imgW) / 2;
+            int imgY = headerH + Math.max(0, (availableH - imgH) / 2 + 8);
+            root.addChild(new PlaceholderElement(imgX, imgY, imgW, imgH));
+            addMapTitle(root, imgY + imgH + 10);
+        }
+    }
+
+    /** 地图名：大号数值字 + 阴影，居中于图片下方。 */
+    private void addMapTitle(GuiElement root, int y) {
+        int titleY = Math.min(y, VotePhase.contentBottom(height) - 14);
+        EspetroAuiWidgets.Text title = EspetroAuiWidgets.centeredText(0, titleY, this.width,
+            mapDisplayName, UiTheme.GOLD);
+        title.setTextScale(UiTheme.TYPE_NUMERAL).setShadow(true);
+        root.addChild(title);
+    }
+
+    /** 居中预览图绘制。 */
+    private static final class RevealImageElement extends GuiElement {
+        private final RevealTexture tex;
+
+        RevealImageElement(int x, int y, int w, int h, RevealTexture tex) {
+            super(x, y, w, h);
+            this.tex = tex;
+        }
+
+        @Override
+        public void draw(GuiGraphics graphics, int x, int y, int width, int height,
+                         int mouseX, int mouseY, float partialTick) {
+            if (!isVisible() || tex == null) return;
+            int bx = x + getX();
+            int by = y + getY();
+            int bw = getWidth();
+            int bh = getHeight();
+            // 相框式卡片 + 发丝描边
+            UiPaint.card(graphics, bx - 8, by - 8, bw + 16, bh + 16, UiTheme.RADIUS_CARD,
+                UiTheme.CARD_TOP, UiTheme.CARD_BOTTOM);
+            graphics.blit(tex.location(), bx, by, bw, bh,
+                0, 0, tex.texW(), tex.texH(), tex.texW(), tex.texH());
+
+        }
+    }
+
+    /** 无预览图占位。 */
+    private static final class PlaceholderElement extends GuiElement {
+        PlaceholderElement(int x, int y, int w, int h) {
+            super(x, y, w, h);
+        }
+
+        @Override
+        public void draw(GuiGraphics graphics, int x, int y, int width, int height,
+                         int mouseX, int mouseY, float partialTick) {
+            if (!isVisible()) return;
+            int bx = x + getX();
+            int by = y + getY();
+            int bw = getWidth();
+            int bh = getHeight();
+            UiPaint.card(graphics, bx, by, bw, bh, UiTheme.RADIUS_CARD,
+                UiTheme.CARD_TOP, UiTheme.CARD_BOTTOM);
+            UiPaint.sunken(graphics, bx + 6, by + 6, bw - 12, bh - 12, UiTheme.RADIUS_CONTROL);
+            UiPaint.textCentered(graphics, "暂无图片", bx, by + bh / 2 - 4, bw,
+                UiTheme.TEXT_THIRD, UiTheme.TYPE_HEADING, false);
+        }
+    }
+
+    private int getSecondsRemaining() {
+        return Math.max(0, (ticksLeft + 19) / 20);
+    }
+
+    @Override
+    public void tick() {
+        super.tick();
+        if (done) return;
+        ticksLeft--;
+        if (phaseHeader != null && ticksLeft % 20 == 0) {
+            phaseHeader.setDetail(getSecondsRemaining() + " 秒后进入装载");
+        }
+        if (ticksLeft <= 0 && Minecraft.getInstance().screen == this && !tutorialPreviewMode) {
+            done = true;
+            // 服务端 5 秒后推进到 MAP_LOADING（GamePhaseSync 会清屏）。
+            // 若已在淡出中则等待完成，避免重复关闭。
+            if (!isFadingOut()) {
+                org.espetro.client.aui.AuiScreen.closeWithFade(this);
+            }
+        }
+    }
+
+    @Override
+    public boolean shouldCloseOnEsc() {
+        return false;
+    }
+
+    @Override
+    public boolean isPauseScreen() {
+        return false;
+    }
+}

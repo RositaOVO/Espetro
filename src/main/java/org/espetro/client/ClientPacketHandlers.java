@@ -11,12 +11,28 @@ import org.espetro.team.GamePhase;
  */
 public class ClientPacketHandlers {
 
+    public static void handleHitboxPolicy(HitboxPolicyPacket packet) {
+        org.espetro.client.vehicle.HitboxPolicyController.onPolicy(packet);
+    }
+
     public static void handleResupplyCatalog(ResupplyCatalogPacket packet) {
         org.espetro.client.gui.ResupplyRadialController.onCatalog(packet);
     }
 
     public static void handleResupplyDelta(ResupplyEntryDeltaPacket packet) {
         org.espetro.client.gui.ResupplyRadialController.onDelta(packet);
+    }
+
+    /** 己方载具名单：用于准心“按 X 来互动”提示的归属判断。 */
+    public static void handleFriendlyVehicles(FriendlyVehiclesPacket packet) {
+        org.espetro.client.vehicle.ClientFriendlyVehicles.update(packet.getVehicles());
+    }
+
+    /** 本地玩家是否处于旁观（观战）模式：观战者在投票阶段只显示等待提示。 */
+    private static boolean isLocalSpectator() {
+        net.minecraft.client.Minecraft mc = net.minecraft.client.Minecraft.getInstance();
+        return mc != null && mc.gameMode != null
+            && mc.gameMode.getPlayerMode() == net.minecraft.world.level.GameType.SPECTATOR;
     }
 
     // ==================== OpenFactionScreenPacket ====================
@@ -55,15 +71,18 @@ public class ClientPacketHandlers {
 
         org.espetro.client.gui.ClientGameState.setPlayerTeam(packet.getTeam());
 
-        if (mc.screen instanceof org.espetro.client.gui.ClassSelectScreen screen) {
+        if (mc.screen instanceof org.espetro.client.gui.ClassSelectScreen screen
+            && !screen.isFadeOutClosing()) {
             // 已在编制选择界面，刷新本方/对方倒计时和当前权限
             screen.updateFromPacket(packet);
         } else {
-            mc.setScreen(new org.espetro.client.gui.ClassSelectScreen(
-                packet.getTeam(), packet.isCommander(), packet.getFactions(),
-                packet.getTimeRemaining(), packet.getOpponentTeamName(),
-                packet.getOpponentFaction(), packet.getOpponentTimeRemaining(),
-                packet.getSelectedFactionId()));
+            org.espetro.client.aui.AuiScreen.openWithFade(
+                new org.espetro.client.gui.ClassSelectScreen(
+                    packet.getTeam(), packet.isCommander(), packet.getFactions(),
+                    packet.getTimeRemaining(), packet.getOpponentTeamName(),
+                    packet.getOpponentFaction(), packet.getOpponentTimeRemaining(),
+                    packet.getSelectedFactionId()),
+                mc.screen);
         }
     }
 
@@ -89,7 +108,7 @@ public class ClientPacketHandlers {
         org.espetro.client.gui.ClientGameState.setPlayerTeam(packet.getTeam());
         net.minecraft.client.Minecraft mc = net.minecraft.client.Minecraft.getInstance();
         if (mc.screen instanceof org.espetro.client.gui.CommanderVoteScreen screen
-            && screen.isForTeam(packet.getTeam())) {
+            && screen.isForTeam(packet.getTeam()) && !screen.isFadeOutClosing()) {
             screen.updatePhaseData(packet.getPlayers(), packet.getTimeRemaining(),
                 packet.getOpponentTeamName(), packet.getOpponentFaction(),
                 packet.getOpponentTimeRemaining());
@@ -108,6 +127,41 @@ public class ClientPacketHandlers {
             packet.getVoteCounts(), packet.getTimeRemaining(), packet.getOpponentTimeRemaining());
     }
 
+    // ==================== TeamAssignPacket / MapRevealPacket ====================
+
+    public static void handleTeamAssign(org.espetro.network.TeamAssignPacket packet) {
+        net.minecraft.client.Minecraft mc = net.minecraft.client.Minecraft.getInstance();
+        if (mc.player == null) return;
+        org.espetro.client.gui.ClientGameState.setPlayerTeam(packet.getTeam());
+        org.espetro.client.aui.AuiScreen.openWithFade(
+            new org.espetro.client.gui.TeamAssignIntroScreen(
+                packet.getTeam(), packet.getDurationSeconds()),
+            mc.screen);
+    }
+
+    public static void handleMapReveal(org.espetro.network.MapRevealPacket packet) {
+        net.minecraft.client.Minecraft mc = net.minecraft.client.Minecraft.getInstance();
+        if (mc.player == null) return;
+        org.espetro.client.aui.AuiScreen.openWithFade(
+            new org.espetro.client.gui.MapRevealScreen(
+                packet.getMapDisplayName(), packet.getMapFolder(), packet.getDurationSeconds()),
+            mc.screen);
+    }
+
+    // ==================== FactionLockRevealPacket ====================
+
+    public static void handleFactionLockReveal(org.espetro.network.FactionLockRevealPacket packet) {
+        net.minecraft.client.Minecraft mc = net.minecraft.client.Minecraft.getInstance();
+        if (mc.player == null) return;
+        org.espetro.client.aui.AuiScreen.openWithFade(
+            new org.espetro.client.gui.FactionLockRevealScreen(
+                packet.getTeam(),
+                packet.getFactionDisplayName(),
+                packet.getFactionSelectionImage(),
+                packet.getDurationSeconds()),
+            mc.screen);
+    }
+
     // ==================== FactionRevealPacket ====================
 
     public static void handleFactionReveal(FactionRevealPacket packet) {
@@ -115,13 +169,14 @@ public class ClientPacketHandlers {
         if (mc.player != null) {
             if (!(mc.screen instanceof org.espetro.client.gui.FactionRevealScreen screen)
                 || !screen.matches(packet.getAttackFactionName(), packet.getDefendFactionName())) {
-                mc.setScreen(new org.espetro.client.gui.FactionRevealScreen(
-                    packet.getAttackFactionName(),
-                    packet.getDefendFactionName(),
-                    packet.getAttackFactionImage(),
-                    packet.getDefendFactionImage(),
-                    packet.getDurationSeconds()
-                ));
+                org.espetro.client.aui.AuiScreen.openWithFade(
+                    new org.espetro.client.gui.FactionRevealScreen(
+                        packet.getAttackFactionName(),
+                        packet.getDefendFactionName(),
+                        packet.getAttackFactionImage(),
+                        packet.getDefendFactionImage(),
+                        packet.getDurationSeconds()),
+                    mc.screen);
             }
         }
     }
@@ -131,13 +186,6 @@ public class ClientPacketHandlers {
     public static void handleTroopCount(TroopCountSyncPacket packet) {
         org.espetro.client.gui.TroopCountOverlay.updateTroopCounts(
             packet.getAttackTroops(), packet.getDefendTroops());
-    }
-
-    // ==================== StaminaSyncPacket ====================
-
-    public static void handleStamina(StaminaSyncPacket packet) {
-        org.espetro.client.gui.StaminaOverlay.update(
-            packet.isEnabled(), packet.getStamina(), packet.getMaxStamina(), packet.getJumpStaminaCost());
     }
 
     // ==================== ClassCountSyncPacket ====================
@@ -165,11 +213,16 @@ public class ClientPacketHandlers {
     // ==================== GamePhaseSyncPacket ====================
 
     public static void handleGamePhase(String phaseName) {
-        handleGamePhase(phaseName, "");
+        handleGamePhase(phaseName, "", "");
     }
 
     public static void handleGamePhase(String phaseName, String mapFolder) {
+        handleGamePhase(phaseName, mapFolder, "");
+    }
+
+    public static void handleGamePhase(String phaseName, String mapFolder, String objectiveMode) {
         org.espetro.client.gui.ClientGameState.setCurrentMapFolder(mapFolder);
+        org.espetro.client.gui.ClientGameState.setObjectiveMode(objectiveMode);
         try {
             GamePhase phase = GamePhase.valueOf(phaseName);
             org.espetro.client.gui.ClientGameState.setCurrentPhase(phase);
@@ -183,8 +236,17 @@ public class ClientPacketHandlers {
             }
 
             net.minecraft.client.Minecraft phaseMc = net.minecraft.client.Minecraft.getInstance();
+            // 地图投票结束进入揭晓页：关闭投票屏（揭晓页由 MapRevealPacket 打开）。
+            // 若投票屏已在淡出中（MapRevealPacket 已排队新屏），勿再追加关闭动作。
+            if ((phase == GamePhase.MAP_REVEAL || phase == GamePhase.MAP_LOADING)
+                && phaseMc.screen instanceof org.espetro.client.gui.MapVoteScreen screen) {
+                if (!screen.isFadingOut()) {
+                    org.espetro.client.aui.AuiScreen.closeWithFade(screen);
+                }
+            }
+            // 揭晓/分配页结束后由对应数据包推进，这里兜底清理
             if (phase == GamePhase.MAP_LOADING
-                && phaseMc.screen instanceof org.espetro.client.gui.MapVoteScreen) {
+                && phaseMc.screen instanceof org.espetro.client.gui.MapRevealScreen) {
                 phaseMc.setScreen(null);
             }
             if (phase.isLobbyLike()
@@ -247,6 +309,10 @@ public class ClientPacketHandlers {
         net.minecraft.client.Minecraft mc = net.minecraft.client.Minecraft.getInstance();
         if (mc.player == null) return;
 
+        // 装备完全解锁模式状态（包级字段；变化时下面刷新职业按钮）
+        boolean freeUnlockChanged = org.espetro.client.gui.UnifiedDeployScreen
+            .applyFreeUnlock(packet.isFreeUnlock());
+
         // 记录当前阵营/编制ID
         org.espetro.client.gui.ClientGameState.setPlayerFactionId(packet.getFactionId());
         org.espetro.client.gui.ClientGameState.setPlayerTeam(packet.getTeam());
@@ -269,14 +335,19 @@ public class ClientPacketHandlers {
             screen.updateClassSwitchCooldown(packet.getClassSwitchCooldownRemaining());
             screen.updateBastions(packet.getBastions());
             screen.updateSquads(packet.getSquads(), packet.getMySquadId());
+            screen.updateSquadCategories(packet.getSquadCategories());
             screen.updateClasses(packet.getClasses(), packet.getClassCounts(), packet.getVariantCounts());
+            // 需求 3-3：载具快照 —— 面板内「载具」上拉菜单的数据源
+            // （空列表时面板显示空态；updateVehicles 内部已做 null 判空，不会 NPE）
+            screen.updateVehicles(packet.getVehicles());
             screen.updateSelectedClass(packet.getSelectedClassId());
-        } else if (mc.screen instanceof org.espetro.client.gui.SquadScreen screen) {
-            // 班组管理是部署界面的子界面。部署阶段会持续发送该包，
-            // 此处只同步实时状态，不能把玩家强制切回部署界面。
-            screen.updateFromDeployPacket(packet);
+            if (freeUnlockChanged) {
+                screen.refreshForFreeUnlock();
+            }
         } else if (packet.shouldOpenScreen()) {
-            mc.setScreen(new org.espetro.client.gui.UnifiedDeployScreen(packet));
+            // J 菜单（统一部署面板，含职业/班组/载具/地图）：从下方滑入，关闭时滑出
+            org.espetro.client.aui.AuiScreen.showWithSlideUp(
+                new org.espetro.client.gui.UnifiedDeployScreen(packet));
         }
     }
 
@@ -290,9 +361,7 @@ public class ClientPacketHandlers {
             packet.getSquads(), packet.getMySquadId(),
             packet.getCommanderNames(), packet.getTeammateNameTagDistance());
 
-        if (mc.screen instanceof org.espetro.client.gui.SquadScreen screen) {
-            screen.updateSquads(packet.getSquads(), packet.getMySquadId());
-        } else if (mc.screen instanceof org.espetro.client.gui.UnifiedDeployScreen screen) {
+        if (mc.screen instanceof org.espetro.client.gui.UnifiedDeployScreen screen) {
             screen.updateSquads(packet.getSquads(), packet.getMySquadId());
             screen.updateSelectedClass(packet.getSelectedClassId());
         }
@@ -303,6 +372,7 @@ public class ClientPacketHandlers {
     public static void handleGameStateResponse(org.espetro.network.GameStateResponsePacket packet) {
         // 更新客户端游戏状态
         org.espetro.client.gui.ClientGameState.setCurrentMapFolder(packet.getMapFolder());
+        org.espetro.client.gui.ClientGameState.setObjectiveMode(packet.getObjectiveMode());
         try {
             org.espetro.client.gui.ClientGameState.setCurrentPhase(
                 GamePhase.valueOf(packet.getPhaseName()));
@@ -325,11 +395,7 @@ public class ClientPacketHandlers {
         net.minecraft.client.Minecraft mc = net.minecraft.client.Minecraft.getInstance();
         if (mc.player == null) return;
 
-        if ("LOBBY".equals(phaseName) || "WAITING_FOR_PLAYERS".equals(phaseName)) {
-            mc.setScreen(new org.espetro.client.gui.HubScreen(0,
-                "等待管理员开始下一局"));
-            return;
-        }
+        // 主城弹窗已整体移除：LOBBY / WAITING_FOR_PLAYERS 阶段不再自动打开任何界面。
         if ("MAP_VOTE".equals(phaseName)) {
             if (!(mc.screen instanceof org.espetro.client.gui.MapVoteScreen)) {
                 mc.setScreen(new org.espetro.client.gui.MapVoteScreen());
@@ -374,7 +440,7 @@ public class ClientPacketHandlers {
         if (mc.player == null) return;
 
         // 更新 MUtil 轮盘技能缓存。
-        org.espetro.client.gui.AuraTipRadialController.updateSkills(
+        org.espetro.client.gui.TacticalRadialController.updateSkills(
             packet.isCommander(), packet.getCooldowns(), packet.getSkills());
 
         // 如果 CommanderSkillScreen 恰好已打开，同步更新数据
@@ -385,17 +451,46 @@ public class ClientPacketHandlers {
 
     // ==================== Multi-dimension flow ====================
 
-    public static void handleOpenHubScreen(OpenHubScreenPacket packet) {
+    /**
+     * 关闭当前打开的对局内模组界面（被设为观察者/移出对局时由服务端调用）。
+     * 服务端已清空队伍/小队/职业记录；客户端同步置空己方队伍/编制并关闭残留的
+     * 部署、投票、选职等界面，避免其残留到后续阶段。组队面板(PartyScreen)不属于对局界面，保留。
+     */
+    public static void handleCloseModScreens() {
         net.minecraft.client.Minecraft mc = net.minecraft.client.Minecraft.getInstance();
         if (mc.player == null) return;
         org.espetro.client.gui.ClientGameState.setPlayerTeam(null);
         org.espetro.client.gui.ClientGameState.setPlayerFactionId(null);
-        // 已打开主城菜单时只更新文案，避免 setScreen 整页重建闪烁。
-        if (mc.screen instanceof org.espetro.client.gui.HubScreen hub) {
-            hub.updateStatus(packet.onlineCount, packet.statusMessage);
-            return;
-        }
-        mc.setScreen(new org.espetro.client.gui.HubScreen(packet.onlineCount, packet.statusMessage));
+        net.minecraft.client.gui.screens.Screen screen = mc.screen;
+        if (screen == null) return;
+        boolean modRoundScreen =
+            screen instanceof org.espetro.client.gui.UnifiedDeployScreen
+            || screen instanceof org.espetro.client.gui.ClassSelectionScreen
+            || screen instanceof org.espetro.client.gui.ClassSelectScreen
+            || screen instanceof org.espetro.client.gui.CommanderVoteScreen
+            || screen instanceof org.espetro.client.gui.CommanderSkillScreen
+            || screen instanceof org.espetro.client.gui.MapVoteScreen
+            || screen instanceof org.espetro.client.gui.MapRevealScreen
+            || screen instanceof org.espetro.client.gui.FactionRevealScreen
+            || screen instanceof org.espetro.client.gui.FactionSelectionScreen
+            || screen instanceof org.espetro.client.gui.TeamSelectionScreen
+            || screen instanceof org.espetro.client.gui.TeamAssignIntroScreen
+            || screen instanceof org.espetro.client.gui.VehicleDeployScreen
+            || screen instanceof org.espetro.client.gui.DeployPointSelectScreen
+            || screen instanceof org.espetro.client.gui.MatchScoreboardScreen
+            || screen instanceof org.espetro.client.gui.RoundEndScreen;
+        if (!modRoundScreen) return;
+        // AuiScreen 淡出关闭（黑幕过渡），普通屏直接关闭。
+        org.espetro.client.aui.AuiScreen.closeWithFade(screen);
+    }
+
+    public static void handleOpenHubScreen(OpenHubScreenPacket packet) {
+        // 主城窗口已彻底移除：即使服务端仍下发该包，客户端也不打开任何界面，
+        // 只清理队伍/编制状态，避免残留。
+        net.minecraft.client.Minecraft mc = net.minecraft.client.Minecraft.getInstance();
+        if (mc.player == null) return;
+        org.espetro.client.gui.ClientGameState.setPlayerTeam(null);
+        org.espetro.client.gui.ClientGameState.setPlayerFactionId(null);
     }
 
     public static void handleClassSelectTimer(ClassSelectTimerPacket packet) {
@@ -428,7 +523,8 @@ public class ClientPacketHandlers {
     public static void handleOpenMapVoteScreen() {
         net.minecraft.client.Minecraft mc = net.minecraft.client.Minecraft.getInstance();
         if (mc.player != null && !(mc.screen instanceof org.espetro.client.gui.MapVoteScreen)) {
-            mc.setScreen(new org.espetro.client.gui.MapVoteScreen());
+            org.espetro.client.aui.AuiScreen.openWithFade(
+                new org.espetro.client.gui.MapVoteScreen(), mc.screen);
         }
     }
 
@@ -490,6 +586,22 @@ public class ClientPacketHandlers {
         org.espetro.client.gui.VehicleWheelController.updateSupply(packet);
     }
 
+    public static void handleMountProgress(MountProgressPacket packet) {
+        org.espetro.client.vehicle.VehicleInteractionKind kind =
+            org.espetro.client.vehicle.VehicleInteractionState.kind();
+        if (!packet.active()) {
+            if (packet.progress() >= 0.999f) {
+                org.espetro.client.vehicle.VehicleInteractionState.setMount(1f);
+            } else if (kind == org.espetro.client.vehicle.VehicleInteractionKind.MOUNT) {
+                org.espetro.client.vehicle.VehicleInteractionState.clear();
+            }
+            return;
+        }
+        float local = org.espetro.client.vehicle.VehicleInteractionState.progress();
+        float merged = local < 0f ? packet.progress() : Math.max(local, packet.progress());
+        org.espetro.client.vehicle.VehicleInteractionState.setMount(merged);
+    }
+
     // ==================== FobSupplySyncPacket ====================
 
     public static void handleFobSupplySync(FobSupplySyncPacket packet) {
@@ -500,13 +612,23 @@ public class ClientPacketHandlers {
         org.espetro.client.gui.OutpostSupplyHud.update(packet);
     }
 
+    /** 固定武器兑换轮盘：服务端下发数据后打开轮盘。 */
+    public static void handleFixedWeaponWheel(FixedWeaponWheelPacket packet) {
+        org.espetro.client.gui.FixedWeaponWheelController.update(packet);
+    }
+
     public static void handleFortificationCatalog(FortificationCatalogPacket packet) {
-        org.espetro.client.gui.AuraTipRadialController
+        org.espetro.client.gui.TacticalRadialController
             .updateFortifications(packet.entries());
     }
 
     public static void handleFortificationPreview(FortificationPreviewPacket packet) {
         org.espetro.client.FortificationPlacementController.begin(packet);
+    }
+
+    public static void handleFortificationWand(
+            org.espetro.network.FortificationWandPacket packet) {
+        org.espetro.client.FortificationWandOverlay.update(packet);
     }
 
     public static void handleFortificationProgress(FortificationProgressPacket packet) {

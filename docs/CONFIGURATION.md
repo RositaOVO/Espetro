@@ -145,6 +145,52 @@ ESPoints。ESPoints 不会自行扫描存档、服务器全局配置或数据包
 - 部署阶段开始时 ESPoints 根据这个冻结快照创建第一批据点。切换地图或强制结束时，据点、标点、底图和缓存会一起清空。
 - 管理命令的“保存配置”只会导出到 `config/espoints/exports/`，不会修改地图模板。
 
+### AAS / RAAS 路线
+
+旧版 `CapturePoints.json` 不需要改动，默认按 AAS 固定路线运行。需要 RAAS 时，在根节点加入 `objectiveMode` 和 `raas`：
+
+```json
+{
+  "objectiveMode": "RAAS",
+  "endBehavior": "terminate",
+  "captureReinforcement": 50,
+  "teamReinforcements": {"ATTACK": 280, "DEFEND": 1200},
+  "plannedPoints": [],
+  "raas": {
+    "points": [
+      {"id":"main","pos1":{"x":0,"y":60,"z":0},"pos2":{"x":16,"y":80,"z":16}},
+      {"id":"crossing_north","pos1":{"x":96,"y":60,"z":-48},"pos2":{"x":112,"y":80,"z":-32}},
+      {"id":"crossing_south","pos1":{"x":96,"y":60,"z":48},"pos2":{"x":112,"y":80,"z":64}},
+      {"id":"terminal","pos1":{"x":192,"y":60,"z":0},"pos2":{"x":208,"y":80,"z":16}}
+    ],
+    "lanes": [
+      {"id":"east","stages":[["main"],["crossing_north","crossing_south"],["terminal"]]}
+    ]
+  }
+}
+```
+
+- `objectiveMode`：仅 `AAS` 或 `RAAS`（已移除 `RANDOM`）。省略时为 `AAS`。
+- `plannedPoints`：AAS 固定批次路线。RAAS 模式下可为空，由 ESPoints 按种子从 `raas` 选出。
+- `raas.points`：RAAS 候选点池。`id` 只允许小写字母、数字、点、下划线和连字符。
+- `raas.lanes[].id`：路线 ID，格式与据点 ID 相同。
+- `raas.lanes[].stages`：合法路线的阶段列表；每个阶段可列多个据点 id，**全部纳入本局**（同批同时活跃）。分支靠多条 `lanes`，不再在阶段内随机抽一个。
+- 每条 RAAS 路线必须有 3～26 个阶段；展开后总据点数 ≤ 26；同一条路线不能跨阶段重复引用同一个点。
+- **权威归属**：Espetro 只装载地图目录并提供 `EsConfig` 路径 + 本局种子；**AAS/RAAS 解析、选路、占点运行时与战术地图均由 ESPoints 负责**。
+- **预设池**：`EsWorld/<map>/Points/*.json`（含 `modes`）为据点权威来源；`EsConfig/game.json` 的 `game.objectiveMode` 决定本图模式；ESPoints 按模式过滤后随机抽一份。旧版 `EsConfig/CapturePoints.json` 仅作回退。
+- **RAAS**：对向推线 + 前线可见性 + 前线重合雾散 + 全占后 `ticketBleedPerSecond` 扣敌兵（详见 ESPoints `docs/RAAS_ESPOINTS.md`）。
+- 服务端每局生成一个随机种子；同一个种子必定得到相同路线，便于复盘和测试。源文件与 `EsWorld` 模板不会被修改。
+
+从 BlockOps 的 `raas/*.properties` 导入时可使用仓库内工具：
+
+```bash
+python tools/import_blockops_raas.py \
+  mutaha.properties EsWorld/mutaha/EsConfig/CapturePoints.json \
+  --mode RAAS --radius 16
+```
+
+转换器只写目标 JSON，不修改输入档案或世界存档。
+
 ## 构建与模组元数据配置
 
 | `gradle.properties` 字段 | 当前值 | 说明 |
@@ -587,7 +633,7 @@ Radio 能足额支付职业变体的 `ammo_cost` 时才会提交；满弹或库�
 | 字段 | 类型 | 默认/说明 |
 | --- | --- | --- |
 | `name`, `description`, `role` | String | GUI 信息 |
-| `icon` | String | 可选；`assets/espetro/textures/gui/roles/` 下不带扩展名的职业图标短名 |
+| `icon` | String | 可选；`assets/espetro/textures/gui/roles/` 下不带扩展名的职业图标短名。当前编制在用的短名：`leader`、`lead_crewman`、`crewman`、`medic`、`rifleman`、`automatic_rifleman`、`machine_gunner`、`grenadier`、`light_at`、`heavy_at`、`marksman`、`raider`、`engineer`、`scout`；另有 `sapper`、`breacher`、`sniper`、`rifleman_scoped`、`unarmed`、`dead`、`pilot`、`lead_pilot`、`medic_alt`、`rank_*`、`incap_*` 等备用图标。改名会让载具组员兼容识别失效（见 `vehicle_crew`） |
 | `row` | Integer | 职业选择界面的行号（1–5）；也接受 `grid_row` / `gridRow`。同一行内按该职业在 `classes` 对象中的 JSON 书写顺序从左到右排列 |
 | `vehicle_crew` | Boolean | 可选；`true` 表示该职业可使用受限载具座位。缺失时为兼容旧编制，仅 `icon: "crewman"` 自动视为载具组员；显式 `false` 可关闭该兼容识别。也接受 `vehicleCrew` |
 | `IconImage` | String | 可选；**文件系统完整路径**的职业图标（优先于 `icon`），例 `/home/shu/图片/Icon/rifleman.png` |
@@ -678,11 +724,29 @@ Radio 能足额支付职业变体的 `ammo_cost` 时才会提交；满弹或库�
 | `troop_value` | 0 | 载具死亡/被摧毁时扣除的所属队伍兵力 |
 | `vehicle_crew_seats` | 按 SBW 类型兼容 | 从 0 号座位开始，前多少个座位要求 `vehicle_crew: true`；`0` 表示不限，负数会拒绝载入编制 |
 | `entity_tags` | `[]` | 生成后附加到实体的 tag 数组 |
-| `fightveh` | 兼容旧配置时为 true | 战斗载具；可在本方基地或载具补给站装卸弹药，不可运输建材，可用于更换职业 |
-| `supplyveh` | false | 补给载具；可在基地或 Radio 附近装卸弹药和建材，可用于更换职业 |
+| `fightveh` | 兼容旧配置时为 true | 步兵战斗载具；可在本方基地或载具补给站装卸弹药，不可运输建材，载具内可更换**完整**职业列表 |
+| `supplyveh` | false | 补给载具；可在基地或 Radio 附近装卸弹药和建材，载具内只能更换驾驶员/载具队长 |
 | `capacity` | 按类型 | 弹药与建材共享总容量；战斗载具默认 500、补给载具默认 3000、其它载具默认 300 |
 | `initial_deploy_delay_seconds.attack` | 0 | 此编制作为进攻方时，从布防阶段开始到系统自动生成首批载具的等待秒数 |
 | `initial_deploy_delay_seconds.defend` | 0 | 此编制作为防守方时，从布防阶段开始到系统自动生成首批载具的等待秒数 |
+| `map_icon` | 空（按车型关键字兜底） | 该车型在战术地图上使用的图标**文件名**，例如 `"map_trackedheavyifv.png"` |
+
+#### 载具地图图标 `map_icon`
+
+`vehicles.<vehicle_type>` 可选的 `map_icon` 字段用于指定该车型在己方战术地图上显示的图标：
+
+- 只写**文件名**，不要写路径或命名空间：`"map_icon": "map_trackedheavyifv.png"`。
+- 客户端只会从 `espoints:textures/gui/mark/friendly/` 目录取图，合法格式为 `[a-z0-9_]+\.png`（小写字母、数字、下划线）。
+- 可选文件名以 EsPoints 的 `assets/espoints/textures/gui/mark/friendly/` 目录为准，例如
+  `map_tank.png`、`map_ifv.png`、`map_trackedifv.png`、`map_trackedheavyifv.png`、`map_apc.png`、
+  `map_trackedapc.png`、`map_jeep.png`、`map_jeep_antitank.png`、`map_jeep_turret.png`、
+  `map_truck_logistics.png`、`map_truck_transport.png`、`map_truck_antiair.png`、
+  `map_transporthelo.png`、`map_attackhelo.png`、`map_uav.png`、`map_antiair.png`、`map_boat.png`、
+  `map_motorcycle.png`、`map_genericinfantry.png` 以及 `t_map_*.png` 系列。
+- `map_icon` 缺失、为空、格式非法，或对应贴图不存在时，客户端自动回退到旧的关键字图标表（坦克/步战/APC/卡车/直升机……），不会显示紫黑格，也不会崩。
+- 服务端只在`编制 JSON → 载具配置 → 战术地图同步包`之间透传这个文件名，不做任何贴图校验；改图标只影响客户端显示，不影响载具实体与平衡。
+
+`map_icon` 是随 EsPoints 协议版本 19 一起新增的同步字段：只升级 Espetro 不升级 EsPoints（或反之）会被握手直接拒绝。
 
 编制文件不再保存部署坐标。部署位置完全由获胜地图的 `VehSpawn.json` 决定。
 布防阶段开始时为每个类型设置首次部署倒计时；倒计时结束后，系统按 `entity` 数组与
@@ -695,6 +759,14 @@ Radio 能足额支付职业变体的 `ammo_cost` 时才会提交；满弹或库�
 该类型按 `fightveh: true` 加载，F 轮盘可在本方基地或载具补给站范围内使用。新配置应显式
 声明其中一种类型；若不需要装卸与更换职业交互，可将两项都显式设为 `false`。任何载具仍会
 保留 F 轮盘「补给步兵」功能，消耗载具弹药按职业缺口补给。
+
+载具内换职白名单完全按配置数据驱动：**只有显式 `fightveh: true` 的步兵战斗载具**允许更换完整
+职业列表；`supplyveh: true` 的补给载具、两项都显式 `false` 的载具，以及未声明任何分类标签的
+旧载具，都只能换成该编制中的**载具组员（驾驶员）**与**载具队长**。这两个职业由职业自身的
+`vehicle_crew: true` 标签识别（旧配置回退到图标 `crewman` / `lead_crewman`），因此与阵营前缀
+无关，新增或改名职业后自动跟随。服务端会拒绝其它职业并提示
+“§c该载具只能更换驾驶员/载具队长职业。”，客户端换职轮盘同步只列出这两个职业。
+未声明标签的旧载具如果需要完整职业列表，请显式补上 `fightveh: true`。
 
 ## 随 JAR 导出的示例编制
 

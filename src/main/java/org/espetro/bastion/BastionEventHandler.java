@@ -20,6 +20,7 @@ import net.minecraftforge.event.entity.EntityLeaveLevelEvent;
 import net.minecraftforge.event.entity.living.LivingDeathEvent;
 import net.minecraftforge.event.entity.player.PlayerEvent;
 import net.minecraftforge.event.entity.player.PlayerInteractEvent;
+import net.minecraftforge.eventbus.api.EventPriority;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 import org.espetro.Espetro;
@@ -153,6 +154,9 @@ public class BastionEventHandler {
         }
 
         TeamPackManager.getInstance().syncTeamPackItem(player);
+
+        // 登录后补发医疗兵标识（职业可能在进入前就已确定，客户端需要它来渲染伤员图标）
+        player.server.execute(() -> org.espetro.network.NetworkManager.sendMedicFlag(player));
 
         // 如果玩家在等待兵站选择状态
         if (BastionManager.getInstance().isWaitingForBastion(player.getUUID())) {
@@ -574,23 +578,31 @@ public class BastionEventHandler {
         radioDismantleTickCounter = 0;
     }
 
-    /** 爆炸摧毁 Radio：按敌方行为扣兵力。 */
-    @SubscribeEvent
+    /**
+     * 爆炸摧毁 Radio 核心：一律记电台损失。
+     * 不得因工事索引跳过——结构减伤路径无法把电台 HP 打到 0，跳过会留下幽灵电台且不扣兵力。
+     */
+    @SubscribeEvent(priority = EventPriority.HIGH)
     public static void onExplosionDetonateRadio(ExplosionEvent.Detonate event) {
-        if (event.getLevel().isClientSide()) {
+        if (event.getLevel().isClientSide() || !(event.getLevel() instanceof ServerLevel level)) {
             return;
         }
+        var explosion = event.getExplosion();
+        Entity attacker = explosion.getIndirectSourceEntity();
+        if (attacker == null) {
+            attacker = explosion.getExploder();
+        }
         for (BlockPos pos : event.getAffectedBlocks()) {
-            if (event.getLevel() instanceof ServerLevel level
-                && FortificationManager.getInstance().contains(level, pos)) {
-                continue; // 统一工事完整度由 FortificationEventHandler 按结构比例处理。
-            }
             BastionData bastion = BastionManager.getInstance().findRadioByBlockPos(pos);
-            if (bastion != null) {
-                BastionManager.getInstance().destroyBastionWithManpower(bastion,
-                    event.getExplosion().getExploder(), true);
+            boolean indexed = FortificationManager.getInstance().contains(level, pos);
+            if (bastion != null && RadioLossPolicy.explosionScoresRadioLoss(true, indexed)) {
+                BastionManager.getInstance().destroyBastionWithManpower(bastion, attacker, true);
             }
         }
+        final Entity lossAttacker = attacker;
+        // Detonate 时方块尚未被原版清掉；本 tick 末再核对，覆盖 affected 漏列/其它模组拆核。
+        level.getServer().execute(() -> BastionManager.getInstance()
+            .destroyRadiosMissingCoreInArea(level, null, Double.POSITIVE_INFINITY, lossAttacker));
     }
 
     /**
@@ -648,6 +660,7 @@ public class BastionEventHandler {
     /**
      * 右击已建成弹药箱：打开更换职业根菜单；潜行右击打开逐项补给会话。
      * 识别以工事 behavior=ammo_crate 为准，原版潜影盒只作为旧世界形状兼容。
+     * 主出生点无限弹药箱（部署点旁自动放置）无需 Radio 即可使用，且补给不消耗弹药值。
      */
     @SubscribeEvent
     public static void onShulkerBoxInteract(PlayerInteractEvent.RightClickBlock event) {
@@ -661,6 +674,24 @@ public class BastionEventHandler {
             event.setCancellationResult(InteractionResult.SUCCESS);
             return;
         }
+
+        // 主出生点无限弹药箱：部署点旁自动放置的潜影盒，具备弹药箱完整功能且不消耗弹药值。
+        boolean mainBaseAmmo = org.espetro.logistics.DeploySupplyStationPlacer
+            .isMainBaseAmmoCrate(level, clickedPos);
+        if (mainBaseAmmo) {
+            event.setCanceled(true);
+            event.setCancellationResult(InteractionResult.SUCCESS);
+            String team = Espetro.getPlayerTeam(player);
+            if (team == null) return;
+            if (player.isShiftKeyDown()) {
+                org.espetro.logistics.resupply.ResupplySessionManager.open(player,
+                    org.espetro.logistics.resupply.ResupplySourceRef.mainBaseAmmo(clickedPos));
+            } else {
+                RadioRadialPacket.openClassMenuAt(player, clickedPos);
+            }
+            return;
+        }
+
         BlockState state = level.getBlockState(clickedPos);
         boolean legacyShulker = state.is(Blocks.SHULKER_BOX)
             || state.is(Blocks.RED_SHULKER_BOX)

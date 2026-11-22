@@ -17,8 +17,11 @@ import org.espetro.bastion.FortificationConfig;
 import org.espetro.bastion.FortificationManager;
 import org.espetro.logistics.LogisticsConfig;
 import org.espetro.team.SpawnPointConfig;
+import org.espetro.vehicle.VehicleClassChangePolicy;
 import org.espetro.vehicle.VehicleConfig;
 import org.espetro.vehicle.VehicleManager;
+import org.espetro.vehicle.VehicleNativeWhitelist;
+import org.espetro.vehicle.VehiclePoseReset;
 
 import javax.annotation.Nullable;
 import java.util.HashMap;
@@ -36,10 +39,16 @@ public final class VehicleSupplyActionPacket {
         UNLOAD_CONSTRUCTION,
         /** 任何载具轮盘的“补给步兵”，消耗载具弹药。 */
         RESUPPLY_INFANTRY,
-        CHANGE_CLASS
+        CHANGE_CLASS,
+        /** 轮盘 2~3 点位置：长按 10 秒后把载具姿态回正并抬到正上方三格。 */
+        RESET_VEHICLE
     }
 
     private static final Map<UUID, Long> LAST_TRANSFER_TICK = new HashMap<>();
+
+    /** 重置载具的服务端冷却：客户端要长按 10 秒，这里只兜住重复包。 */
+    private static final int RESET_COOLDOWN_TICKS = 40;
+    private static final Map<UUID, Long> LAST_RESET_TICK = new HashMap<>();
 
     private final UUID vehicleId;
     private final Action action;
@@ -68,6 +77,14 @@ public final class VehicleSupplyActionPacket {
         if (player == null) return;
         Interaction interaction = resolveInteraction(player, vehicleId);
         if (interaction == null) {
+            // 白名单载具的轮盘入口：后续做专属轮盘时改这里。
+            // 未在 activeVehicleData 中的白名单载具只回"空壳"快照让轮盘能打开，
+            // 不执行任何补给/建造/换装写操作。
+            VehicleSupplySyncPacket shell = nativeWhitelistSync(player, vehicleId);
+            if (shell != null) {
+                NetworkManager.NET.send(PacketDistributor.PLAYER.with(() -> player), shell);
+                return;
+            }
             player.displayClientMessage(Component.literal("§c请正对五格内的己方载具。"), true);
             return;
         }
@@ -80,9 +97,16 @@ public final class VehicleSupplyActionPacket {
         }
         if (action == Action.CHANGE_CLASS) {
             if (interaction.config().canChangeClass()) {
-                NetworkManager.sendVehicleClassSelect(player, interaction.factionId());
+                // 补给载具与无标签载具只下发驾驶员/载具队长，客户端轮盘因此不会列出其它职业。
+                boolean crewOnly = !VehicleClassChangePolicy
+                    .allowsFullClassChange(interaction.config());
+                NetworkManager.sendVehicleClassSelect(player, interaction.factionId(), crewOnly);
             }
             sendSync(player, interaction);
+            return;
+        }
+        if (action == Action.RESET_VEHICLE) {
+            handleResetVehicle(player, interaction);
             return;
         }
 
@@ -120,12 +144,35 @@ public final class VehicleSupplyActionPacket {
         return true;
     }
 
+    /** 轮盘「重置载具」：姿态回正 + 抬到正上方三格。检查与实体解析全部服务端重算。 */
+    private static void handleResetVehicle(ServerPlayer player, Interaction interaction) {
+        long now = player.serverLevel().getGameTime();
+        long previous = LAST_RESET_TICK.getOrDefault(player.getUUID(), Long.MIN_VALUE / 2);
+        if (now - previous < RESET_COOLDOWN_TICKS) return;
+        Entity vehicle = VehicleManager.getInstance()
+            .getLoadedVehicle(player, interaction.vehicleId());
+        if (vehicle == null) {
+            player.displayClientMessage(Component.literal("§c载具已不在加载范围内。"), true);
+            return;
+        }
+        if (!VehiclePoseReset.reset(vehicle)) {
+            player.displayClientMessage(Component.literal("§c该目标无法重置。"), true);
+            return;
+        }
+        LAST_RESET_TICK.put(player.getUUID(), now);
+        player.displayClientMessage(Component.literal(
+            "§a载具已重置：姿态回正，并抬到正上方 "
+                + (int) VehiclePoseReset.LIFT_BLOCKS + " 格。"), true);
+        sendSync(player, interaction);
+    }
+
     public static void clearPlayerRateLimit(UUID playerId) {
         LAST_TRANSFER_TICK.remove(playerId);
     }
 
     public static void clearRateLimits() {
         LAST_TRANSFER_TICK.clear();
+        LAST_RESET_TICK.clear();
     }
 
     private static void loadAmmo(ServerPlayer player, Interaction interaction, int chunk) {
@@ -135,16 +182,17 @@ public final class VehicleSupplyActionPacket {
             player.displayClientMessage(Component.literal("§e载具容量已满。"), true);
             return;
         }
-        int available = interaction.mainBase() ? wanted
+        // 主基地/骑乘在载具上：不经过 FOB Radio 库存，直接按需求装载
+        int available = interaction.unrestricted() ? wanted
             : Math.min(wanted, interaction.radio().getAmmunitionSupplies());
         if (available <= 0) {
             player.displayClientMessage(Component.literal("§c补给点弹药不足。"), true);
             return;
         }
-        if (!interaction.mainBase()
+        if (!interaction.unrestricted()
             && !interaction.radio().consumeAmmunitionSupplies(available)) return;
         int added = supply.addAmmo(available);
-        if (added < available && !interaction.mainBase()) {
+        if (added < available && !interaction.unrestricted()) {
             interaction.radio().addAmmunitionSupplies(
                 available - added, LogisticsConfig.get().maxAmmunition);
         }
@@ -154,7 +202,7 @@ public final class VehicleSupplyActionPacket {
     private static void unloadAmmo(ServerPlayer player, Interaction interaction, int chunk) {
         VehicleManager.VehicleSupplyState supply = interaction.supply();
         int removable = Math.min(chunk, supply.getAmmo());
-        if (!interaction.mainBase()) {
+        if (!interaction.unrestricted()) {
             removable = Math.min(removable,
                 Math.max(0, LogisticsConfig.get().maxAmmunition
                     - interaction.radio().getAmmunitionSupplies()));
@@ -164,7 +212,7 @@ public final class VehicleSupplyActionPacket {
             return;
         }
         int removed = supply.removeAmmo(removable);
-        if (!interaction.mainBase()) {
+        if (!interaction.unrestricted()) {
             interaction.radio().addAmmunitionSupplies(removed, LogisticsConfig.get().maxAmmunition);
         }
         notifyRadio(interaction.radio());
@@ -177,16 +225,17 @@ public final class VehicleSupplyActionPacket {
             player.displayClientMessage(Component.literal("§e载具容量已满。"), true);
             return;
         }
-        int available = interaction.mainBase() ? wanted
+        // 主基地/骑乘在载具上：不经过 FOB Radio 库存，直接按需求装载
+        int available = interaction.unrestricted() ? wanted
             : Math.min(wanted, interaction.radio().getConstructionSupplies());
         if (available <= 0) {
             player.displayClientMessage(Component.literal("§c补给点建材不足。"), true);
             return;
         }
-        if (!interaction.mainBase()
+        if (!interaction.unrestricted()
             && !interaction.radio().consumeConstructionSupplies(available)) return;
         int added = supply.addConstruction(available);
-        if (added < available && !interaction.mainBase()) {
+        if (added < available && !interaction.unrestricted()) {
             interaction.radio().addConstructionSupplies(
                 available - added, LogisticsConfig.get().maxConstruction);
         }
@@ -196,7 +245,7 @@ public final class VehicleSupplyActionPacket {
     private static void unloadConstruction(ServerPlayer player, Interaction interaction, int chunk) {
         VehicleManager.VehicleSupplyState supply = interaction.supply();
         int removable = Math.min(chunk, supply.getConstruction());
-        if (!interaction.mainBase()) {
+        if (!interaction.unrestricted()) {
             removable = Math.min(removable,
                 Math.max(0, LogisticsConfig.get().maxConstruction
                     - interaction.radio().getConstructionSupplies()));
@@ -206,7 +255,7 @@ public final class VehicleSupplyActionPacket {
             return;
         }
         int removed = supply.removeConstruction(removable);
-        if (!interaction.mainBase()) {
+        if (!interaction.unrestricted()) {
             interaction.radio().addConstructionSupplies(removed, LogisticsConfig.get().maxConstruction);
         }
         notifyRadio(interaction.radio());
@@ -215,7 +264,49 @@ public final class VehicleSupplyActionPacket {
     @Nullable
     public static VehicleSupplySyncPacket createSyncResponse(ServerPlayer player, UUID vehicleId) {
         Interaction interaction = resolveInteraction(player, vehicleId);
-        return interaction == null ? null : toPacket(interaction);
+        if (interaction != null) {
+            return toPacket(interaction);
+        }
+        // 白名单载具的轮盘入口：后续做专属轮盘时改这里。
+        return nativeWhitelistSync(player, vehicleId);
+    }
+
+    /**
+     * 非 Espetro 部署的白名单载具的"最小交互对象"轮盘快照。
+     *
+     * <p>未部署载具不在 {@code VehicleManager.activeVehicleData} 中，正常路径返回 null
+     * 会让客户端 {@code snapshotReady} 恒为 false、轮盘永不打开。这里按最小合法值构造
+     * 空壳 {@link Interaction}（阵营 id 空串、补给/战斗属性全 false、弹药/建材/容量全 0），
+     * 使 {@code client/gui/VehicleWheelController} 能照常 {@code open(ROOT)}。</p>
+     *
+     * <p><b>不</b>写 {@code activeVehicleData}、<b>不</b>调用
+     * {@code getOrCreateVehicleSupply}，因此不会产生任何补给/建造/换装写操作；
+     * 该快照的所有装卸/换装标志均为 false，唯一可用项是"补给步兵"
+     * （见 {@link VehicleSupplySyncPacket#hasAnyAction()}），而
+     * {@link #handleServer} 对白名单空壳只回快照、不派发任何 action。</p>
+     */
+    @Nullable
+    private static VehicleSupplySyncPacket nativeWhitelistSync(ServerPlayer player, UUID vehicleId) {
+        Interaction shell = nativeWhitelistInteraction(player, vehicleId);
+        return shell == null ? null : toPacket(shell);
+    }
+
+    @Nullable
+    private static Interaction nativeWhitelistInteraction(ServerPlayer player, UUID vehicleId) {
+        if (player == null || vehicleId == null) return null;
+        Entity entity = player.serverLevel().getEntity(vehicleId);
+        if (entity == null || entity.isRemoved() || !VehicleNativeWhitelist.isNative(entity)) {
+            return null;
+        }
+        // 空壳配置：max/respawn 无意义，supplyVeh/fightVeh 保持 false。
+        VehicleConfig.VehicleTypeConfig config = new VehicleConfig.VehicleTypeConfig(0, 0);
+        VehicleManager.VehicleSupplyState supply =
+            new VehicleManager.VehicleSupplyState(0, false);
+        boolean ridingThisVehicle = player.getVehicle() != null
+            && (vehicleId.equals(player.getVehicle().getUUID())
+                || vehicleId.equals(player.getVehicle().getRootVehicle().getUUID()));
+        return new Interaction(vehicleId, "", config, supply, false, null,
+            ridingThisVehicle, false, false);
     }
 
     private static void sendSync(ServerPlayer player, Interaction interaction) {
@@ -254,6 +345,10 @@ public final class VehicleSupplyActionPacket {
         ServerLevel level = player.serverLevel();
         BlockPos vehiclePos = entity.blockPosition();
         boolean mainBase = isAtMainBase(level, vehiclePos, team);
+        // 骑乘在载具上本身不授予装卸权限：装卸必须在主基地或 FOB 覆盖范围内。
+        boolean ridingThisVehicle = player.getVehicle() != null
+            && (vehicleId.equals(player.getVehicle().getUUID())
+                || vehicleId.equals(player.getVehicle().getRootVehicle().getUUID()));
         BastionData radio = null;
         if (!mainBase) {
             if (config.supplyVeh) {
@@ -269,7 +364,7 @@ public final class VehicleSupplyActionPacket {
         boolean canTransferAmmo = supplyLike && (mainBase || radio != null);
         boolean canTransferConstruction = config.supplyVeh && canTransferAmmo;
         return new Interaction(vehicleId, factionId, config, supply, mainBase, radio,
-            canTransferAmmo, canTransferConstruction);
+            ridingThisVehicle, canTransferAmmo, canTransferConstruction);
     }
 
     static boolean isAtMainBase(ServerLevel level, BlockPos vehiclePos, String team) {
@@ -292,8 +387,13 @@ public final class VehicleSupplyActionPacket {
         VehicleManager.VehicleSupplyState supply,
         boolean mainBase,
         @Nullable BastionData radio,
+        boolean ridingThisVehicle,
         boolean canTransferAmmo,
         boolean canTransferConstruction
     ) {
+        /** 主基地装卸不经过 FOB Radio 库存；骑乘载具本身不授予装卸权限。 */
+        boolean unrestricted() {
+            return mainBase;
+        }
     }
 }

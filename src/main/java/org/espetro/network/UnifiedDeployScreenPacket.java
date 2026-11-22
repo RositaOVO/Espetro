@@ -53,6 +53,8 @@ public class UnifiedDeployScreenPacket {
     private final String selectedClassId;
     /** true 时客户端应打开面板；false 时仅刷新当前已打开的面板和战术缓存。 */
     private final boolean openScreen;
+    /** 装备完全解锁模式：客户端据此跳过人数类置灰（位置/冷却/入队判定仍保留）。 */
+    private final boolean freeUnlock;
 
     public UnifiedDeployScreenPacket(
             String factionId, String factionName, String factionDescription, String factionIcon,
@@ -132,6 +134,25 @@ public class UnifiedDeployScreenPacket {
             boolean waitingForDeploySelection, int outpostRedeployCooldownRemaining,
             List<SquadCategoryInfo> squadCategories, int classSwitchCooldownRemaining,
             boolean openScreen, String selectedClassId) {
+        this(factionId, factionName, factionDescription, factionIcon,
+            classes, classCounts, hasDeployPoint, deployPointPos, bastions,
+            isCommander, vehicles, squads, mySquadId, deployTimeRemaining, team,
+            commanderNames, teammateNameTagDistance, waitingForDeploySelection,
+            outpostRedeployCooldownRemaining, squadCategories, classSwitchCooldownRemaining,
+            openScreen, selectedClassId, false);
+    }
+
+    public UnifiedDeployScreenPacket(
+            String factionId, String factionName, String factionDescription, String factionIcon,
+            List<ClassInfo> classes, Map<String, Integer> classCounts,
+            boolean hasDeployPoint, String deployPointPos, List<BastionItem> bastions,
+            boolean isCommander, List<VehicleInfo> vehicles,
+            List<SquadInfo> squads, int mySquadId,
+            int deployTimeRemaining, String team,
+            List<String> commanderNames, double teammateNameTagDistance,
+            boolean waitingForDeploySelection, int outpostRedeployCooldownRemaining,
+            List<SquadCategoryInfo> squadCategories, int classSwitchCooldownRemaining,
+            boolean openScreen, String selectedClassId, boolean freeUnlock) {
         this.factionId = factionId;
         this.factionName = factionName;
         this.factionDescription = factionDescription;
@@ -155,6 +176,7 @@ public class UnifiedDeployScreenPacket {
         this.classSwitchCooldownRemaining = Math.max(0, classSwitchCooldownRemaining);
         this.openScreen = openScreen;
         this.selectedClassId = selectedClassId == null ? "" : selectedClassId;
+        this.freeUnlock = freeUnlock;
     }
 
     public UnifiedDeployScreenPacket(FriendlyByteBuf buf) {
@@ -218,6 +240,7 @@ public class UnifiedDeployScreenPacket {
         this.classSwitchCooldownRemaining = buf.readVarInt();
         this.openScreen = buf.readBoolean();
         this.selectedClassId = buf.readUtf();
+        this.freeUnlock = buf.readBoolean();
     }
 
     public static UnifiedDeployScreenPacket read(FriendlyByteBuf buf) {
@@ -271,6 +294,7 @@ public class UnifiedDeployScreenPacket {
         buf.writeVarInt(classSwitchCooldownRemaining);
         buf.writeBoolean(openScreen);
         buf.writeUtf(selectedClassId);
+        buf.writeBoolean(freeUnlock);
     }
 
     public void handle(Supplier<NetworkEvent.Context> ctx) {
@@ -321,6 +345,8 @@ public class UnifiedDeployScreenPacket {
     public int getClassSwitchCooldownRemaining() { return classSwitchCooldownRemaining; }
     public boolean shouldOpenScreen() { return openScreen; }
     public String getSelectedClassId() { return selectedClassId; }
+    /** 装备完全解锁模式：客户端据此跳过人数类置灰。 */
+    public boolean isFreeUnlock() { return freeUnlock; }
 
     // ============ Inner Classes ============
 
@@ -562,6 +588,7 @@ public class UnifiedDeployScreenPacket {
         public static final String TYPE_HAB = "hab";
         public static final String TYPE_RALLY = "rally";
         public static final String TYPE_OUTPOST = "outpost";
+        public static final String TYPE_MAIN = "main";
 
         public final java.util.UUID id;
         public final String name;
@@ -650,6 +677,20 @@ public class UnifiedDeployScreenPacket {
          * 获取前哨基地索引（从0开始）
          */
         public int getOutpostIndex() {
+            return (int) (id.getLeastSignificantBits() - 1);
+        }
+
+        /**
+         * 判断是否为主基地重生点（用特殊 UUID 标记：MSB=1, LSB=index+1）。
+         */
+        public boolean isMain() {
+            return TYPE_MAIN.equals(type) || id.getMostSignificantBits() == 1L;
+        }
+
+        /**
+         * 获取主基地重生点索引（从0开始）。
+         */
+        public int getMainIndex() {
             return (int) (id.getLeastSignificantBits() - 1);
         }
     }

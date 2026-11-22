@@ -10,6 +10,7 @@ import net.minecraftforge.network.PacketDistributor;
 import net.minecraftforge.network.simple.SimpleChannel;
 import org.espetro.Espetro;
 import org.espetro.config.GameConfig;
+import org.espetro.mapconfig.BattlefieldContext;
 import org.espetro.team.*;
 
 import java.nio.file.Files;
@@ -27,7 +28,7 @@ import java.util.UUID;
  */
 public class NetworkManager {
 
-    public static final String PROTOCOL_VERSION = "1.31";
+    public static final String PROTOCOL_VERSION = "1.39";
 
     public static final SimpleChannel NET = NetworkRegistry.newSimpleChannel(
         ResourceLocation.fromNamespaceAndPath(Espetro.MOD_ID, "main"),
@@ -97,6 +98,15 @@ public class NetworkManager {
             TeamSelectPacket::write,
             TeamSelectPacket::read,
             TeamSelectPacket::handle
+        );
+
+        // 观战请求包（中途加入面板"进入观战"）
+        NET.registerMessage(
+            nextId(),
+            SpectateRequestPacket.class,
+            SpectateRequestPacket::write,
+            SpectateRequestPacket::read,
+            SpectateRequestPacket::handle
         );
 
         // 职业选择包（包含结果）
@@ -198,6 +208,24 @@ public class NetworkManager {
             FactionRevealPacket::handle
         );
 
+        // 队伍分配提示页包（S→C）
+        NET.registerMessage(
+            nextId(),
+            TeamAssignPacket.class,
+            TeamAssignPacket::write,
+            TeamAssignPacket::read,
+            TeamAssignPacket::handle
+        );
+
+        // 地图揭晓页包（S→C）
+        NET.registerMessage(
+            nextId(),
+            MapRevealPacket.class,
+            MapRevealPacket::write,
+            MapRevealPacket::read,
+            MapRevealPacket::handle
+        );
+
         // 职业选择界面包（S→C）
         NET.registerMessage(
             nextId(),
@@ -214,6 +242,15 @@ public class NetworkManager {
             RequestClassSelectionPacket::write,
             RequestClassSelectionPacket::read,
             RequestClassSelectionPacket::handle
+        );
+
+        // 客户端补加实体后请求重同步位置/数据（方案 A：修复开局载具错位）
+        NET.registerMessage(
+            nextId(),
+            EntityResyncRequestPacket.class,
+            EntityResyncRequestPacket::write,
+            EntityResyncRequestPacket::read,
+            EntityResyncRequestPacket::handle
         );
 
         // 请求游戏状态包（C→S）
@@ -250,6 +287,15 @@ public class NetworkManager {
             RequestVehicleInfoPacket::write,
             RequestVehicleInfoPacket::read,
             RequestVehicleInfoPacket::handle
+        );
+
+        // 主动重新部署请求包（C→S）：立刻阵亡，对战阶段扣兵力、部署阶段不扣
+        NET.registerMessage(
+            nextId(),
+            RedeployRequestPacket.class,
+            RedeployRequestPacket::write,
+            RedeployRequestPacket::read,
+            RedeployRequestPacket::handle
         );
 
         // 复活点选择界面包（S→C）
@@ -304,24 +350,6 @@ public class NetworkManager {
             CommanderSkillSyncPacket::write,
             CommanderSkillSyncPacket::read,
             CommanderSkillSyncPacket::handle
-        );
-
-        // 体力状态同步包（S→C）
-        NET.registerMessage(
-            nextId(),
-            StaminaSyncPacket.class,
-            StaminaSyncPacket::write,
-            StaminaSyncPacket::read,
-            StaminaSyncPacket::handle
-        );
-
-        // 跳跃体力动作包（C→S）
-        NET.registerMessage(
-            nextId(),
-            StaminaJumpPacket.class,
-            StaminaJumpPacket::write,
-            StaminaJumpPacket::read,
-            StaminaJumpPacket::handle
         );
 
         NET.registerMessage(
@@ -385,6 +413,9 @@ public class NetworkManager {
         NET.registerMessage(nextId(), FortificationProgressPacket.class,
             FortificationProgressPacket::write, FortificationProgressPacket::read,
             FortificationProgressPacket::handle);
+        NET.registerMessage(nextId(), FortificationWandPacket.class,
+            FortificationWandPacket::write, FortificationWandPacket::read,
+            FortificationWandPacket::handle);
         NET.registerMessage(nextId(), AudioCuePacket.class,
             AudioCuePacket::write, AudioCuePacket::read, AudioCuePacket::handle);
         NET.registerMessage(nextId(), TaczGunPackSyncChunkPacket.class,
@@ -424,6 +455,77 @@ public class NetworkManager {
             .decoder(CloseResupplySessionPacket::read)
             .consumerMainThread(CloseResupplySessionPacket::handle)
             .add();
+
+        NET.messageBuilder(MountRequestPacket.class, nextId(), NetworkDirection.PLAY_TO_SERVER)
+            .encoder(MountRequestPacket::write)
+            .decoder(MountRequestPacket::read)
+            .consumerMainThread(MountRequestPacket::handle)
+            .add();
+        NET.messageBuilder(MountProgressPacket.class, nextId(), NetworkDirection.PLAY_TO_CLIENT)
+            .encoder(MountProgressPacket::write)
+            .decoder(MountProgressPacket::read)
+            .consumerMainThread(MountProgressPacket::handle)
+            .add();
+        NET.messageBuilder(DismountRequestPacket.class, nextId(), NetworkDirection.PLAY_TO_SERVER)
+            .encoder(DismountRequestPacket::write)
+            .decoder(DismountRequestPacket::read)
+            .consumerMainThread(DismountRequestPacket::handle)
+            .add();
+        NET.messageBuilder(SeatSwitchReadyPacket.class, nextId(), NetworkDirection.PLAY_TO_SERVER)
+            .encoder(SeatSwitchReadyPacket::write)
+            .decoder(SeatSwitchReadyPacket::read)
+            .consumerMainThread(SeatSwitchReadyPacket::handle)
+            .add();
+        // 服务端→客户端：碰撞体积显示策略
+        NET.messageBuilder(HitboxPolicyPacket.class, nextId(), NetworkDirection.PLAY_TO_CLIENT)
+            .encoder(HitboxPolicyPacket::write)
+            .decoder(HitboxPolicyPacket::read)
+            .consumerMainThread(HitboxPolicyPacket::handle)
+            .add();
+        // 服务端→客户端：强制关闭对局内模组界面（设为观察者等移出对局场景）
+        NET.messageBuilder(CloseModScreensPacket.class, nextId(), NetworkDirection.PLAY_TO_CLIENT)
+            .encoder(CloseModScreensPacket::write)
+            .decoder(CloseModScreensPacket::read)
+            .consumerMainThread(CloseModScreensPacket::handle)
+            .add();
+        // 固定武器：F 键用 FOB 弹药兑换（协议 1.12）
+        NET.registerMessage(nextId(), FixedWeaponExchangePacket.class,
+            FixedWeaponExchangePacket::write, FixedWeaponExchangePacket::read,
+            FixedWeaponExchangePacket::handle);
+        // 固定武器：F 打开兑换轮盘（协议 1.13）
+        NET.registerMessage(nextId(), FixedWeaponOpenPacket.class,
+            FixedWeaponOpenPacket::write, FixedWeaponOpenPacket::read,
+            FixedWeaponOpenPacket::handle);
+        NET.registerMessage(nextId(), FixedWeaponWheelPacket.class,
+            FixedWeaponWheelPacket::write, FixedWeaponWheelPacket::read,
+            FixedWeaponWheelPacket::handle);
+        // 医疗兵身份同步（协议 1.14）：客户端据此绘制倒地队友标识
+        NET.registerMessage(nextId(), MedicFlagPacket.class,
+            MedicFlagPacket::write, MedicFlagPacket::read,
+            MedicFlagPacket::handle);
+        // 编制指定展示页（协议 1.38）：地图已指定某方编制时，跳过投票只展示 N 秒。
+        NET.registerMessage(nextId(), FactionLockRevealPacket.class,
+            FactionLockRevealPacket::write, FactionLockRevealPacket::read,
+            FactionLockRevealPacket::handle);
+        // 己方载具名单（协议 1.39）：客户端准心提示据此判断载具归属。
+        NET.registerMessage(nextId(), FriendlyVehiclesPacket.class,
+            FriendlyVehiclesPacket::write, FriendlyVehiclesPacket::read,
+            FriendlyVehiclesPacket::handle);
+        // 注册总数与协议版本一起打印：客户端出现 "invalid discriminator byte N" 时，
+        // 这里的 N 必须小于本行打印的数量，否则说明客户端 jar 是旧的。
+        org.espetro.Espetro.LOGGER.info(
+            "Espetro 网络协议 {}: 已注册 {} 个网络包（判别号 0~{}）",
+            PROTOCOL_VERSION, packetId, packetId - 1);
+    }
+
+    /** 同步"本机玩家是否为医疗兵"：登录、选职、清职时调用；并记录状态供 {@link MedicFlagSync} 对账。 */
+    public static void sendMedicFlag(net.minecraft.server.level.ServerPlayer player) {
+        if (player == null) return;
+        String classId = org.espetro.api.EspetroAPI.getPlayerClass(player.getUUID());
+        boolean medic = org.espetro.team.FactionDataProvider.getOrCreateLoader().isMedicClass(classId);
+        MedicFlagSync.note(player.getUUID(), medic);
+        NET.send(net.minecraftforge.network.PacketDistributor.PLAYER.with(() -> player),
+            new MedicFlagPacket(medic));
     }
 
     public static void sendBuildFortification(String fortId) {
@@ -445,8 +547,30 @@ public class NetworkManager {
         NET.sendToServer(FortificationWorkPacket.entity(target, build));
     }
 
+    /** 固定武器：请求打开兑换轮盘（对普通载具会静默无响应）。 */
+    public static void sendFixedWeaponOpen(UUID weaponEntityId) {
+        if (weaponEntityId == null) {
+            return;
+        }
+        NET.sendToServer(new FixedWeaponOpenPacket(weaponEntityId));
+    }
+
+    /** 固定武器：请求用所在 FOB 的弹药兑换一次。 */
+    public static void sendFixedWeaponExchange(UUID weaponEntityId, int index) {
+        if (weaponEntityId == null) {
+            return;
+        }
+        NET.sendToServer(new FixedWeaponExchangePacket(weaponEntityId, Math.max(0, index)));
+    }
+
     public static void requestFortificationCatalog() {
         NET.sendToServer(FortificationCatalogPacket.request());
+    }
+
+    /** 工事编辑器选区同步（仅发给对应的管理员）。 */
+    public static void sendFortificationWand(ServerPlayer player, FortificationWandPacket packet) {
+        if (player == null || packet == null) return;
+        NET.send(PacketDistributor.PLAYER.with(() -> player), packet);
     }
 
     public static void sendRadioOpen(net.minecraft.core.BlockPos pos) {
@@ -465,8 +589,25 @@ public class NetworkManager {
         NET.send(PacketDistributor.PLAYER.with(() -> player), new EquipZoneSyncPacket(zones));
     }
 
+    /** 重发部署界面（不打开面板），用于开关状态变化后让界面立刻按新规则重算。 */
+    public static void resendDeployScreen(ServerPlayer player) {
+        if (player == null) return;
+        sendUnifiedDeployScreen(player, -1, false);
+    }
+
     /** 向玩家发送载具职业选择（不依赖 Radio，战斗载具专用） */
     public static void sendVehicleClassSelect(ServerPlayer player, String factionId) {
+        sendVehicleClassSelect(player, factionId, false);
+    }
+
+    /**
+     * 向玩家发送载具职业选择。
+     *
+     * @param crewOnly true 时只下发载具组员（驾驶员）与载具队长，用于补给载具与无标签载具；
+     *                 显式 {@code fightveh: true} 的步兵战斗载具传 false，保持完整职业列表。
+     *                 只是过滤同一个 {@link RadioRadialPacket#classList} 的元素，协议字段不变。
+     */
+    public static void sendVehicleClassSelect(ServerPlayer player, String factionId, boolean crewOnly) {
         if (factionId == null) return;
         var loader = org.espetro.team.FactionDataProvider.getOrCreateLoader();
         var server = player.getServer();
@@ -480,10 +621,15 @@ public class NetworkManager {
             ? org.espetro.team.SquadManager.getInstance().getSquadMemberUuids(team, squadId).size()
             : 0;
         int cooldown = counts.getClassSwitchCooldownRemaining(player.getUUID());
+        boolean freeUnlock = org.espetro.team.FreeUnlockManager.isEnabled();
         var list = new java.util.ArrayList<RadioRadialPacket.ClassEntry>();
         if (kits != null) {
             for (var kit : kits) {
                 if (kit == null) continue;
+                if (crewOnly
+                    && !org.espetro.vehicle.VehicleClassChangePolicy.isVehicleCrewClass(kit)) {
+                    continue;
+                }
                 int squadCount = counts.getSquadClassCountForViewer(
                     player.getUUID(), team, kit.id);
                 int maxCount = kit.teamCount
@@ -496,13 +642,14 @@ public class NetworkManager {
                     denial = "职业切换冷却中，还需等待 " + cooldown + " 秒。";
                 } else if (!inSquad) {
                     denial = "请先加入班组小队后再选择职业。";
-                } else if (kit.teammatesNeed > 0 && squadSize < kit.teammatesNeed) {
+                } else if (!freeUnlock && kit.teammatesNeed > 0 && squadSize < kit.teammatesNeed) {
                     denial = "小队达到 " + kit.teammatesNeed + " 人后才能选择该职业。";
-                } else if (kit.teamCount && squadCount >= kit.maxPlayers) {
+                } else if (!freeUnlock && kit.teamCount && squadCount >= kit.maxPlayers) {
                     denial = "本小队该职业人数已满（" + squadCount + "/" + kit.maxPlayers + "）。";
-                } else if (!kit.teamCount && teamCount >= kit.maxPlayers) {
+                } else if (!freeUnlock && !kit.teamCount && teamCount >= kit.maxPlayers) {
                     denial = "该职业全队人数已满（" + teamCount + "/" + kit.maxPlayers + "）。";
-                } else if (!kit.teamCount && kit.maxPerSquad > 0 && squadCount >= kit.maxPerSquad) {
+                } else if (!freeUnlock && !kit.teamCount && kit.maxPerSquad > 0
+                    && squadCount >= kit.maxPerSquad) {
                     denial = "本小队该职业人数已满（" + squadCount + "/" + kit.maxPerSquad + "）。";
                 }
                 boolean enabled = denial.isEmpty();
@@ -517,7 +664,7 @@ public class NetworkManager {
                             ? counts.countVariantInSquad(team, squadId, kit.id, variant.id)
                             : counts.getVariantCount(team, kit.id, variant.id);
                         boolean variantEnabled = enabled
-                            && (!kit.strictCount || variantCount < variant.maxPlayers);
+                            && (freeUnlock || !kit.strictCount || variantCount < variant.maxPlayers);
                         String variantDenial = denial;
                         if (enabled && !variantEnabled)
                             variantDenial = "该装备变体人数已满（" + variantCount + "/" + variant.maxPlayers + "）。";
@@ -575,6 +722,11 @@ public class NetworkManager {
      */
     public static void sendFactionSelect(String factionId) {
         NET.sendToServer(new TeamSelectPacket(factionId));
+    }
+
+    /** 请求进入观战（中途加入面板按钮，C→S）。 */
+    public static void sendSpectateRequest() {
+        NET.sendToServer(new SpectateRequestPacket());
     }
 
     /**
@@ -645,9 +797,7 @@ public class NetworkManager {
         NET.sendToServer(new RequestGameStatePacket());
     }
 
-    public static void sendStaminaJump() {
-        NET.sendToServer(new StaminaJumpPacket());
-    }
+
 
     public static void sendRadialAction(RadialActionPacket.Action action) {
         NET.sendToServer(new RadialActionPacket(action));
@@ -747,6 +897,15 @@ public class NetworkManager {
         sendCurrentTeamSelectState(player);
     }
 
+    /**
+     * 要求指定玩家客户端立即关闭对局内模组界面（设为观察者/移出对局时调用）。
+     * 主城菜单等基础界面保留。
+     */
+    public static void sendCloseModScreens(ServerPlayer player) {
+        if (player == null) return;
+        NET.send(PacketDistributor.PLAYER.with(() -> player), new CloseModScreensPacket());
+    }
+
     /** 向单个玩家发送当前的队伍选择状态。 */
     public static void sendCurrentTeamSelectState(ServerPlayer player) {
         MinecraftServer server = Espetro.getServer();
@@ -768,7 +927,7 @@ public class NetworkManager {
             new TeamSelectStatePacket(attack, defend, 0, end, false, myTeam, null, atkImg, defImg));
     }
 
-    private static String getFactionSelectionImage(String factionId) {
+    public static String getFactionSelectionImage(String factionId) {
         return getFactionSelectionImageStatic(factionId);
     }
 
@@ -833,9 +992,66 @@ public class NetworkManager {
                 totalImageBytes += imageData.length;
             }
             list.add(new ClassSelectScreenPacket.FactionInfo(
-                id, name, selectionImage, voteCounts.getOrDefault(id, 0), imageData));
+                id, name, selectionImage, voteCounts.getOrDefault(id, 0), imageData,
+                faction != null && faction.showName != null && !faction.showName.isBlank()
+                    ? faction.showName : name,
+                faction != null && faction.description != null ? faction.description : "",
+                buildFactionVehicleLines(loader, id),
+                buildFactionFortLines(id)));
         }
         return list;
+    }
+
+    /** 编制投票卡片「?」面板：该编制的载具显示名与刷新时间（分钟）。 */
+    private static List<ClassSelectScreenPacket.VehicleLine> buildFactionVehicleLines(
+            FactionDataLoader loader, String factionId) {
+        java.util.Map<String, FactionDataLoader.VehicleData> vehicles = loader.getFactionVehicles(factionId);
+        if (vehicles == null || vehicles.isEmpty()) return java.util.List.of();
+        List<ClassSelectScreenPacket.VehicleLine> lines = new ArrayList<>(vehicles.size());
+        for (java.util.Map.Entry<String, FactionDataLoader.VehicleData> entry : vehicles.entrySet()) {
+            FactionDataLoader.VehicleData data = entry.getValue();
+            if (data == null) continue;
+            String display = data.displayName != null && !data.displayName.isBlank()
+                ? data.displayName : entry.getKey();
+            int minutes = data.respawnMinutes > 0
+                ? data.respawnMinutes : FactionDataLoader.VehicleData.DEFAULT_RESPAWN_MINUTES;
+            int slots = data.entities != null && !data.entities.isEmpty() ? data.entities.size() : 1;
+            int count = slots * Math.max(1, data.perMaxCount);
+            lines.add(new ClassSelectScreenPacket.VehicleLine(stripFormatting(display), minutes, count));
+        }
+        return lines;
+    }
+
+    /** 编制投票卡片「?」面板：仅限该编制部署的专属工事与单编制数量上限。 */
+    private static List<ClassSelectScreenPacket.FortLine> buildFactionFortLines(String factionId) {
+        List<ClassSelectScreenPacket.FortLine> lines = new ArrayList<>();
+        for (org.espetro.bastion.FortificationConfig.FortificationDef def
+                : org.espetro.bastion.FortificationConfig.list()) {
+            if (def == null || def.requirements == null) continue;
+            List<String> factions = def.requirements.factions;
+            if (factions == null || factions.isEmpty() || !factions.contains(factionId)) continue;
+            if (def.requirements.maxPerFaction <= 0) continue;
+            String display = def.displayName != null && !def.displayName.isBlank()
+                ? def.displayName : def.id;
+            lines.add(new ClassSelectScreenPacket.FortLine(
+                stripFormatting(display), def.requirements.maxPerFaction));
+        }
+        return lines;
+    }
+
+    /** 去掉 § 色码：AUI 自绘文本不解析格式化码。 */
+    private static String stripFormatting(String value) {
+        if (value == null || value.isEmpty()) return "";
+        StringBuilder out = new StringBuilder(value.length());
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c == '\u00a7') {
+                i++;
+                continue;
+            }
+            out.append(c);
+        }
+        return out.toString().trim();
     }
 
     /**
@@ -909,6 +1125,16 @@ public class NetworkManager {
         sendCommanderVoteScreenForTeamView(server, oppositeTeam(team), 0, timeRemaining);
     }
 
+    /**
+     * 双方并行指挥官投票：给攻守两队各自发送「本方候选 + 统一倒计时」的投票界面。
+     */
+    public static void broadcastBothCommanderVoteScreens(int timeRemaining) {
+        MinecraftServer server = Espetro.getServer();
+        if (server == null) return;
+        sendCommanderVoteScreenForTeamView(server, "ATTACK", timeRemaining, -1);
+        sendCommanderVoteScreenForTeamView(server, "DEFEND", timeRemaining, -1);
+    }
+
     private static void sendCommanderVoteScreenForTeamView(MinecraftServer server, String viewTeam,
                                                            int timeRemaining, int opponentTimeRemaining) {
         VoteManager voteManager = VoteManager.getInstance();
@@ -937,6 +1163,19 @@ public class NetworkManager {
                 NET.send(PacketDistributor.PLAYER.with(() -> player), packet);
             }
         }
+    }
+
+    /**
+     * 发送指挥官投票界面给单个指定玩家（并行模式：本方候选 + 剩余倒计时）。
+     */
+    public static void sendCommanderVoteScreenToPlayer(ServerPlayer player, String team,
+                                                       String[] candidateNames, int timeRemaining) {
+        if (player == null || team == null) return;
+        List<String> names = candidateNames == null
+            ? List.of() : java.util.Arrays.asList(candidateNames);
+        CommanderVotePacket packet = new CommanderVotePacket(team, names, timeRemaining,
+            "", "", -1);
+        NET.send(PacketDistributor.PLAYER.with(() -> player), packet);
     }
 
     /**
@@ -1051,6 +1290,22 @@ public class NetworkManager {
     /**
      * 广播双方最终编制揭示界面给所有在线玩家。
      */
+    /**
+     * 广播“编制指定”展示页：地图已指定该方编制时使用（不投票，仅展示 N 秒）。
+     */
+    public static void broadcastFactionLockReveal(String team, String factionDisplayName,
+                                                  String factionSelectionImage, int durationSeconds) {
+        MinecraftServer server = Espetro.getServer();
+        if (server == null) {
+            return;
+        }
+        FactionLockRevealPacket packet = new FactionLockRevealPacket(
+            team, factionDisplayName, factionSelectionImage, durationSeconds);
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            NET.send(PacketDistributor.PLAYER.with(() -> player), packet);
+        }
+    }
+
     public static void broadcastFactionRevealScreen(String attackFactionId, String defendFactionId, int durationSeconds) {
         MinecraftServer server = Espetro.getServer();
         if (server == null) return;
@@ -1068,6 +1323,56 @@ public class NetworkManager {
         }
     }
 
+    // ==================== 队伍分配提示页 / 地图揭晓页 ====================
+
+    /**
+     * 广播队伍分配提示页：每个玩家收到自己所在队伍（5 秒后由服务端推进到指挥官投票）。
+     */
+    public static void broadcastTeamAssignShow(MinecraftServer server) {
+        if (server == null) return;
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            String team = org.espetro.team.ClassCountManager.getInstance()
+                .getPlayerTeam(player.getUUID());
+            if (team == null) team = org.espetro.team.GameStateManager
+                .getTeamFromFactionStatic(
+                    org.espetro.team.ClassCountManager.getInstance()
+                        .getPlayerFaction(player.getUUID()));
+            if (team == null) continue;
+            sendTeamAssignShowTo(player, team, 5);
+        }
+    }
+
+    /** 向单个玩家发送队伍分配提示页（剩余秒数用于页面倒计时展示）。 */
+    public static void sendTeamAssignShowTo(ServerPlayer player, String team, int remainingSeconds) {
+        if (player == null || player.connection == null || team == null) return;
+        NET.send(PacketDistributor.PLAYER.with(() -> player),
+            new TeamAssignPacket(team, Math.max(1, remainingSeconds)));
+    }
+
+    /**
+     * 广播地图揭晓页（胜出地图 + 预览图）。
+     */
+    public static void broadcastMapRevealScreen(MinecraftServer server,
+                                                 org.espetro.mapconfig.ActiveMapConfig winner,
+                                                 int durationSeconds) {
+        if (server == null || winner == null) return;
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            NET.send(PacketDistributor.PLAYER.with(() -> player),
+                new MapRevealPacket(winner.displayName, winner.mapFolder,
+                    Math.max(1, durationSeconds)));
+        }
+    }
+
+    /** 向单个玩家发送地图揭晓页（中途加入同步）。 */
+    public static void broadcastMapRevealScreenTo(ServerPlayer player,
+                                                  org.espetro.mapconfig.ActiveMapConfig winner,
+                                                  int durationSeconds) {
+        if (player == null || player.connection == null || winner == null) return;
+        NET.send(PacketDistributor.PLAYER.with(() -> player),
+            new MapRevealPacket(winner.displayName, winner.mapFolder,
+                Math.max(1, durationSeconds)));
+    }
+
     /**
      * 发送投票
      */
@@ -1082,7 +1387,9 @@ public class NetworkManager {
         MinecraftServer server = Espetro.getServer();
         if (server == null) return;
         GamePhaseSyncPacket packet = new GamePhaseSyncPacket(
-            phase, org.espetro.team.GameStateManager.getInstance().getCurrentMapFolder());
+            phase,
+            org.espetro.team.GameStateManager.getInstance().getCurrentMapFolder(),
+            BattlefieldContext.getObjectiveMode());
         for (ServerPlayer player : server.getPlayerList().getPlayers()) {
             NET.send(PacketDistributor.PLAYER.with(() -> player), packet);
         }
@@ -1157,6 +1464,11 @@ public class NetworkManager {
     /** 客户端请求打开只读载具信息面板。 */
     public static void requestVehicleInfo() {
         NET.sendToServer(new RequestVehicleInfoPacket());
+    }
+
+    /** 客户端请求重新部署（立刻阵亡；对战阶段扣兵力，部署阶段不扣）。 */
+    public static void requestRedeploy() {
+        NET.sendToServer(new RedeployRequestPacket());
     }
 
     private static void sendVehicleDeployScreen(ServerPlayer player, String factionId,
@@ -1291,6 +1603,8 @@ public class NetworkManager {
         }
 
         java.util.List<UnifiedDeployScreenPacket.BastionItem> bastionList = new java.util.ArrayList<>();
+        // 多个主基地重生点：每个都作为一条可部署项（UUID MSB=1, LSB=index+1）。
+        bastionList.addAll(mainSpawnItems(team));
         // 列出全部己方 HAB（含启用倒计时/无覆盖等），状态文案供 UI 展示；选择时再 isHabOperational
         for (org.espetro.bastion.BastionData bd : bm.getTeamBastions(team)) {
             net.minecraft.core.BlockPos armorStandPos = bm.getRecordedArmorStandPosition(bd);
@@ -1309,8 +1623,8 @@ public class NetworkManager {
         }
         bastionList.addAll(org.espetro.team.TeamPackManager.getInstance().getDeployItemsForPlayer(player));
 
-        // 防守方在部署阶段可使用前哨基地
-        if ("DEFEND".equals(team) && org.espetro.team.OutpostManager.getInstance().isAvailable()) {
+        // AAS 防守方在部署阶段可使用前哨基地；RAAS 双方都不可用。
+        if (org.espetro.team.OutpostManager.getInstance().canListFor(team)) {
             var outposts = org.espetro.team.OutpostManager.getInstance().getOutposts();
             for (int i = 0; i < outposts.size(); i++) {
                 var op = outposts.get(i);
@@ -1323,9 +1637,32 @@ public class NetworkManager {
             }
         }
 
-        // 载具部署已分离到独立界面，J 键主面板不再枚举载具运行时状态。
+        // 载具运行时状态：面板内「载具」上拉菜单的数据源。
+        // 与 sendVehicleDeployScreen 使用同一套 API；cooldownRemaining 沿用该字段的
+        // 历史单位（秒），不改协议字段的顺序与含义。
+        java.util.List<UnifiedDeployScreenPacket.VehicleInfo> vehicleList = new java.util.ArrayList<>();
+        org.espetro.vehicle.VehicleManager vehicleManager =
+            org.espetro.vehicle.VehicleManager.getInstance();
+        java.util.Map<String, org.espetro.vehicle.VehicleConfig.VehicleTypeConfig> vehicleConfigs =
+            org.espetro.vehicle.VehicleConfig.getFactionVehicles(factionId);
+        for (java.util.Map.Entry<String, org.espetro.vehicle.VehicleConfig.VehicleTypeConfig> vehicleEntry
+                : vehicleConfigs.entrySet()) {
+            String vehicleType = vehicleEntry.getKey();
+            org.espetro.vehicle.VehicleConfig.VehicleTypeConfig vehicleCfg = vehicleEntry.getValue();
+            int vehicleCurrent = team == null
+                ? vehicleManager.getActiveCount(factionId, vehicleType)
+                : vehicleManager.getActiveCount(team, factionId, vehicleType);
+            long vehicleCooldownMs = vehicleManager.getCooldownRemaining(team, factionId, vehicleType);
+            vehicleList.add(new UnifiedDeployScreenPacket.VehicleInfo(
+                vehicleType,
+                org.espetro.vehicle.VehicleManager.getDisplayName(factionId, vehicleType),
+                vehicleCfg.max,
+                vehicleCurrent,
+                (int) (vehicleCooldownMs / 1000L),
+                vehicleCfg.respawnMinutes));
+        }
+
         boolean isCmd = voteManager.isCommanderOf(player.getUUID(), team);
-        java.util.List<UnifiedDeployScreenPacket.VehicleInfo> vehicleList = java.util.Collections.emptyList();
 
         // === 小队数据 ===
         java.util.List<UnifiedDeployScreenPacket.SquadInfo> squadList = buildSquadInfoList(team);
@@ -1358,7 +1695,8 @@ public class NetworkManager {
                 .getClassSwitchCooldownRemaining(player.getUUID()),
             openScreen,
             java.util.Objects.toString(
-                ClassCountManager.getInstance().getPlayerClass(player.getUUID()), "")
+                ClassCountManager.getInstance().getPlayerClass(player.getUUID()), ""),
+            org.espetro.team.FreeUnlockManager.isEnabled()
         );
 
         NET.send(PacketDistributor.PLAYER.with(() -> player), packet);
@@ -1393,26 +1731,56 @@ public class NetworkManager {
         }
     }
 
-    /** HAB/Radio 生命周期变化后立即刷新该阵营正在等待部署的成员。 */
+    /**
+     * HAB/Radio 生命周期变化后立即刷新该阵营的部署点列表。
+     *
+     * <p>不再只刷新"等待复活"的玩家：玩家可能正开着部署界面（J 菜单）看兵站列表，
+     * 兵站被摧毁后必须立刻把新列表推给他，否则按钮会残留、点击必然失败。</p>
+     */
     public static void refreshDeployPointsForTeam(String team) {
         MinecraftServer server = Espetro.getServer();
         if (server == null || team == null) return;
         GamePhase phase = GameStateManager.getInstance().getCurrentPhase();
         if (phase != GamePhase.DEPLOYING && phase != GamePhase.BATTLE) return;
-        org.espetro.bastion.BastionManager bm = org.espetro.bastion.BastionManager.getInstance();
         for (ServerPlayer player : server.getPlayerList().getPlayers()) {
-            if (team.equals(Espetro.getPlayerTeam(player))
-                && bm.isWaitingForBastion(player.getUUID())) {
+            if (team.equals(Espetro.getPlayerTeam(player))) {
                 sendDeployPointSync(player);
             }
         }
+    }
+
+    /** 主基地重生点条目（多主基地）：UUID MSB=1, LSB=index+1，类型 main。 */
+    private static java.util.List<UnifiedDeployScreenPacket.BastionItem> mainSpawnItems(String team) {
+        java.util.List<UnifiedDeployScreenPacket.BastionItem> items = new java.util.ArrayList<>();
+        java.util.List<org.espetro.team.SpawnPointConfig.SpawnPoint> mains =
+            org.espetro.team.SpawnPointConfig.getSpawnPoints(team);
+        for (int i = 0; i < mains.size(); i++) {
+            org.espetro.team.SpawnPointConfig.SpawnPoint sp = mains.get(i);
+            if (sp == null) {
+                continue;
+            }
+            items.add(new UnifiedDeployScreenPacket.BastionItem(
+                new java.util.UUID(1L, i + 1L),
+                sp.name == null || sp.name.isBlank() ? ("主基地 #" + (i + 1)) : sp.name,
+                Math.round(sp.x) + ", " + Math.round(sp.y) + ", " + Math.round(sp.z),
+                UnifiedDeployScreenPacket.BastionItem.TYPE_MAIN,
+                "主基地"));
+        }
+        return items;
     }
 
     private static java.util.List<UnifiedDeployScreenPacket.BastionItem> buildDeployPointItems(
             ServerPlayer player, String team) {
         org.espetro.bastion.BastionManager bm = org.espetro.bastion.BastionManager.getInstance();
         java.util.List<UnifiedDeployScreenPacket.BastionItem> items = new java.util.ArrayList<>();
+        // 主基地必须与统一部署界面一致，否则随后的 DeployPointSyncPacket 会把它们“刷掉”。
+        items.addAll(mainSpawnItems(team));
         for (org.espetro.bastion.BastionData bd : bm.getTeamBastions(team)) {
+            // 已被摧毁的兵站不再出现在部署列表里（否则旧按钮会残留、点了必然失败）
+            if (!bd.isActive()) continue;
+            // 兵站失去己方 Radio（FOB 被拆/被摧毁）后永久不可部署：直接从列表剔除，
+            // 否则条目会一直挂在部署点栏里、点了才报错。
+            if (bd.isHab() && !bm.hasFriendlyRadioCovering(bd)) continue;
             net.minecraft.core.BlockPos armorStandPos = bm.getRecordedArmorStandPosition(bd);
             if (armorStandPos == null) continue;
             items.add(new UnifiedDeployScreenPacket.BastionItem(
@@ -1425,7 +1793,7 @@ public class NetworkManager {
         }
         items.addAll(org.espetro.team.TeamPackManager.getInstance().getDeployItemsForPlayer(player));
 
-        if ("DEFEND".equals(team) && org.espetro.team.OutpostManager.getInstance().isAvailable()) {
+        if (org.espetro.team.OutpostManager.getInstance().canListFor(team)) {
             var outposts = org.espetro.team.OutpostManager.getInstance().getOutposts();
             for (int i = 0; i < outposts.size(); i++) {
                 var op = outposts.get(i);
@@ -1541,7 +1909,7 @@ public class NetworkManager {
         return getFactionDisplayName(opponentFactionId);
     }
 
-    private static String getFactionDisplayName(String factionId) {
+    public static String getFactionDisplayName(String factionId) {
         if (factionId == null || factionId.isEmpty()) return null;
 
         org.espetro.team.FactionDataLoader loader =
@@ -1561,7 +1929,7 @@ public class NetworkManager {
     }
 
     private static String teamDisplayName(String team) {
-        return "ATTACK".equals(team) ? "进攻方" : "防守方";
+        return TeamDisplayNames.displayName(team);
     }
 
     /**
@@ -1579,6 +1947,7 @@ public class NetworkManager {
     }
 
     public static void sendCommanderSkillActivate(String skillId) {
+
         NET.sendToServer(new CommanderSkillPacket(skillId));
     }
 
@@ -1597,6 +1966,19 @@ public class NetworkManager {
         boolean showSkillsEntry = isCommander || !views.isEmpty();
         CommanderSkillSyncPacket packet = new CommanderSkillSyncPacket(showSkillsEntry, cooldowns, views);
         NET.send(PacketDistributor.PLAYER.with(() -> player), packet);
+    }
+
+    /**
+     * 重新推送全服玩家的技能同步包。
+     * <p>指挥官/小队长变化时调用：技能入口与列表都要同步收回，否则客户端会残留上一次的身份。</p>
+     */
+    public static void syncCommanderSkillsToAll(MinecraftServer server) {
+        if (server == null) {
+            return;
+        }
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            sendCommanderSkillSync(player);
+        }
     }
 
     // ===== multi-dimension helpers =====
@@ -1695,6 +2077,10 @@ public class NetworkManager {
 
     public static void sendPartyJoin(java.util.UUID partyId, String password) {
         NET.sendToServer(PartyActionPacket.join(partyId, password));
+    }
+
+    public static void sendPartySetPassword(java.util.UUID partyId, String password) {
+        NET.sendToServer(PartyActionPacket.setPassword(partyId, password));
     }
 
     public static void sendPartyLeave() {

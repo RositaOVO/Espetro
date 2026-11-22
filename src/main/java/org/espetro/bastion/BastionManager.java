@@ -618,6 +618,41 @@ public class BastionManager {
         return status != null && status.equals("HAB 可部署");
     }
 
+    /**
+     * 实时判断 HAB 是否仍被己方 Radio 建造半径覆盖（不读缓存，供部署列表过滤用）。
+     * <p>
+     * 与 {@link #recomputeHabCoverage()} 同一套判定，但每次现算：读档后缓存尚未重算、
+     * 或缓存与实际不一致时，不会把可部署的 HAB 误判成不可部署。
+     */
+    public boolean hasFriendlyRadioCovering(BastionData hab) {
+        if (hab == null || !hab.isActive()) {
+            return false;
+        }
+        if (hab.isRadio() && hab.isLegacyCombined()) {
+            return true;
+        }
+        if (!hab.isHab()) {
+            return false;
+        }
+        double buildRadius = LogisticsConfig.get().radioBuildRadius;
+        double radiusSq = buildRadius * buildRadius;
+        for (BastionData radio : bastions.values()) {
+            if (radio == hab || !radio.isActive() || !radio.isRadio()) {
+                continue;
+            }
+            if (radio.getLevel() != hab.getLevel()) {
+                continue;
+            }
+            if (!Objects.equals(radio.getTeam(), hab.getTeam())) {
+                continue;
+            }
+            if (radio.getPosition().distSqr(hab.getPosition()) <= radiusSq) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** HAB 或旧版合并 FOB 是否仍被己方 Radio 建造半径覆盖。 */
     public boolean isCoveredByFriendlyRadio(BastionData hab) {
         if (hab == null || !hab.isActive()) {
@@ -746,6 +781,10 @@ public class BastionManager {
         }
 
         setBastionActive(bastion, false);
+        if (!silent) {
+            // 立即把新部署点列表推给该阵营（可能有玩家正开着部署界面在看这个兵站）
+            org.espetro.network.NetworkManager.refreshDeployPointsForTeam(bastionTeam);
+        }
         // Radio 增减会影响 HAB 覆盖；silent 战局清理由 reset 整体清空，无需重算。
         if (radio && !silent) {
             recomputeHabCoverage();
@@ -763,6 +802,10 @@ public class BastionManager {
                 Espetro.LOGGER.info("Radio {} 被摧毁！攻击者={} 扣兵力={}", bastionName, attackerName, penalty);
                 Espetro.broadcastToTeam(bastionTeam,
                     "§c[Radio] §e" + bastionName + " §c已被摧毁！- " + penalty + " 兵力");
+            } else if (radio) {
+                Espetro.LOGGER.info("Radio {} 被拆除（不扣兵力）攻击者={}", bastionName, attackerName);
+                Espetro.broadcastToTeam(bastionTeam,
+                    "§e[Radio] §6" + bastionName + " §e已拆除（不扣兵力）。");
             } else {
                 Espetro.LOGGER.info("兵站 HAB {} 被摧毁！攻击者={}（不扣兵力）", bastionName, attackerName);
                 Espetro.broadcastToTeam(bastionTeam,
@@ -774,7 +817,9 @@ public class BastionManager {
                 commander.sendSystemMessage(net.minecraft.network.chat.Component.literal(
                     deductManpower
                         ? "§c你的 Radio §e" + bastionName + " §c已被摧毁！"
-                        : "§c你的兵站 §e" + bastionName + " §c已被摧毁！"
+                        : radio
+                            ? "§e你的 Radio §6" + bastionName + " §e已拆除。"
+                            : "§c你的兵站 §e" + bastionName + " §c已被摧毁！"
                 ));
             }
         }
@@ -1052,9 +1097,10 @@ public class BastionManager {
     /**
      * 轻量一致性清理：仅移除已标记失效的脏记录。
      * <p>
-     * 真摧毁只走事件（{@link BastionEventHandler} 死亡/离开非 unload、方块破坏等）→
-     * {@link #destroyBastion}。禁止「区块已加载却找不到实体」时当摧毁
+     * HAB 真摧毁只走事件（{@link BastionEventHandler} 死亡/离开非 unload、方块破坏等）→
+     * {@link #destroyBastion}。禁止「区块已加载却找不到盔甲架」时当摧毁
      * （卸载竞态 + 无强加载时更易误杀）。
+     * 电台核心是方块：已加载区块中方块消失则记电台损失（爆炸/其它拆除漏网）。
      * 若核心已加载，顺带刷新记录坐标（不强制加载区块）。
      */
     public void removeInvalidBastions() {
@@ -1078,6 +1124,46 @@ public class BastionManager {
                 updateBastionArmorStandPosition(bastion, stand.blockPosition());
             }
         }
+        destroyRadiosMissingCoreInArea(null, null, Double.POSITIVE_INFINITY, null);
+    }
+
+    /**
+     * 已加载区块中电台核心方块消失时记为电台损失。
+     * 不推断未加载区块。{@code center == null} 时检查全部活跃电台。
+     *
+     * @return 本次记损失的电台数
+     */
+    public int destroyRadiosMissingCoreInArea(@Nullable ServerLevel level,
+                                              @Nullable net.minecraft.world.phys.Vec3 center,
+                                              double radius,
+                                              @Nullable Entity attacker) {
+        double radiusSq = radius * radius;
+        List<BastionData> missing = new ArrayList<>();
+        for (BastionData bastion : bastions.values()) {
+            if (bastion == null || !bastion.isActive() || !bastion.isRadio()) {
+                continue;
+            }
+            if (level != null && bastion.getLevel() != level) {
+                continue;
+            }
+            BlockPos pos = bastion.getPosition();
+            ServerLevel bastionLevel = bastion.getLevel();
+            if (pos == null || bastionLevel == null || !bastion.isChunkLoaded()) {
+                continue;
+            }
+            if (center != null && pos.distToCenterSqr(center) > radiusSq) {
+                continue;
+            }
+            if (BastionItems.RADIO_BLOCK != null
+                && bastionLevel.getBlockState(pos).is(BastionItems.RADIO_BLOCK)) {
+                continue;
+            }
+            missing.add(bastion);
+        }
+        for (BastionData bastion : missing) {
+            destroyBastionWithManpower(bastion, attacker, true);
+        }
+        return missing.size();
     }
 
     /**
@@ -1369,7 +1455,6 @@ public class BastionManager {
         armorStand.setCustomNameVisible(false);
         syncCoreArmorStand(armorStand);
         armorStand.setHealth(armorStandHealth);
-
         ItemStack helmet = new ItemStack(Items.LEATHER_HELMET);
         CompoundTag displayTag = new CompoundTag();
         displayTag.putInt("color", "ATTACK".equals(team) ? 0xAA0000 : 0x0000AA);
@@ -1386,7 +1471,10 @@ public class BastionManager {
         if (maxHealth != null && maxHealth.getBaseValue() != armorStandHealth) {
             maxHealth.setBaseValue(armorStandHealth);
         }
-        armorStand.setInvulnerable(false);
+        // 核心隐藏 + 无敌：兵站只能通过工事结构（铲子拆除/爆炸）摧毁，
+        // 不再能直接攻击盔甲架核心（读档后再次确保）。
+        armorStand.setInvulnerable(true);
+        armorStand.setInvisible(true);
         armorStand.setSilent(true);
         armorStand.addTag("bastion_armor_stand");
     }
@@ -1620,6 +1708,12 @@ public class BastionManager {
 
         // 传送玩家到原部署点。该坐标由队伍复活点 JSON 配置保存，不再因目标区块未加载而取消。
         player.teleportTo(deployPoint.level, deployPoint.pos.getX() + 0.5, deployPoint.pos.getY() + 0.1, deployPoint.pos.getZ() + 0.5, 0f, 0f);
+        // 原版重生点直接写进战场维度：阵亡后由原版复活流程直接生在新战场，
+        // 不再"复活到主城 overworld → 再被传送回战场"连跳两次维度。
+        // 光影（Oculus）客户端每次维度切换都要重建渲染管线，连续两次极易卡死/掉线。
+        player.setRespawnPosition(deployPoint.level.dimension(),
+            new BlockPos(deployPoint.pos.getX(), deployPoint.pos.getY(), deployPoint.pos.getZ()),
+            0f, true, false);
         // 先传送后清除等待，防止空窗期间移动包绕过检查
         clearWaiting(player.getUUID());
 
@@ -1639,7 +1733,7 @@ public class BastionManager {
         ));
         org.espetro.team.GameStateManager.getInstance().applyBattlefieldMiningRestriction(player);
 
-        player.sendSystemMessage(net.minecraft.network.chat.Component.literal("§a已在原部署点复活！"));
+        player.sendSystemMessage(net.minecraft.network.chat.Component.literal("§a已在主基地复活！"));
 
         return true;
     }

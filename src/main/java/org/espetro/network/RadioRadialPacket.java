@@ -233,7 +233,10 @@ public class RadioRadialPacket {
     }
 
     private void handleOpen(ServerPlayer player) {
-        if (!isFriendlyRadioNearby(player, pos)) {
+        // 主出生点无限弹药箱不需要附近 Radio 即可打开职业轮盘
+        boolean mainBaseAmmo = org.espetro.logistics.DeploySupplyStationPlacer
+            .isMainBaseAmmoCrate((net.minecraft.server.level.ServerLevel) player.serverLevel(), pos);
+        if (!mainBaseAmmo && !isFriendlyRadioNearby(player, pos)) {
             player.sendSystemMessage(Component.literal("§c附近没有己方 Radio。"));
             return;
         }
@@ -253,6 +256,7 @@ public class RadioRadialPacket {
             ? SquadManager.getInstance().getSquadMemberUuids(team, squadId).size()
             : 0;
         int cooldown = counts.getClassSwitchCooldownRemaining(player.getUUID());
+        boolean freeUnlock = org.espetro.team.FreeUnlockManager.isEnabled();
         if (kits != null) {
             for (FactionDataLoader.ClassKitData kit : kits) {
                 if (kit == null) continue;
@@ -268,15 +272,15 @@ public class RadioRadialPacket {
                     denial = "职业切换冷却中，还需等待 " + cooldown + " 秒。";
                 } else if (!inSquad) {
                     denial = "请先加入班组小队后再选择职业。";
-                } else if (kit.teammatesNeed > 0 && squadSize < kit.teammatesNeed) {
+                } else if (!freeUnlock && kit.teammatesNeed > 0 && squadSize < kit.teammatesNeed) {
                     denial = "小队达到 " + kit.teammatesNeed + " 人后才能选择该职业。";
-                } else if (kit.teamCount && squadCount >= kit.maxPlayers) {
+                } else if (!freeUnlock && kit.teamCount && squadCount >= kit.maxPlayers) {
                     denial = "本小队该职业人数已满（" + squadCount + "/"
                         + kit.maxPlayers + "）。";
-                } else if (!kit.teamCount && teamCount >= kit.maxPlayers) {
+                } else if (!freeUnlock && !kit.teamCount && teamCount >= kit.maxPlayers) {
                     denial = "该职业全队人数已满（" + teamCount + "/"
                         + kit.maxPlayers + "）。";
-                } else if (!kit.teamCount && kit.maxPerSquad > 0
+                } else if (!freeUnlock && !kit.teamCount && kit.maxPerSquad > 0
                     && squadCount >= kit.maxPerSquad) {
                     denial = "本小队该职业人数已满（" + squadCount + "/"
                         + kit.maxPerSquad + "）。";
@@ -298,7 +302,8 @@ public class RadioRadialPacket {
                                 team, squadId, kit.id, variant.id)
                             : counts.getVariantCount(team, kit.id, variant.id);
                         boolean variantEnabled = enabled
-                            && (!kit.strictCount || variantCount < variant.maxPlayers);
+                            && (freeUnlock || !kit.strictCount
+                                || variantCount < variant.maxPlayers);
                         String variantDenial = denial;
                         if (enabled && !variantEnabled) {
                             variantDenial = "该装备变体人数已满（" + variantCount + "/"
@@ -348,6 +353,27 @@ public class RadioRadialPacket {
         double radius = LogisticsConfig.get().depositRadius + 2.0;
         BlockPos playerPos = player.blockPosition();
         BlockPos anchor = clickPos != null ? clickPos : playerPos;
+
+        // 点击位置是己方已注册弹药箱：直接按其归属 Radio 放行。
+        // 弹药箱建造时已校验在己方 Radio 覆盖范围内，无需再做「附近最近 Radio」
+        // 模糊搜索（depositRadius 小于 radioBuildRadius，边缘 FOB 的弹药箱会被误拒）。
+        if (player.level() instanceof net.minecraft.server.level.ServerLevel level) {
+            org.espetro.bastion.FortificationManager fm =
+                org.espetro.bastion.FortificationManager.getInstance();
+            BastionData crateRadio = fm.findRadioForAmmoCrate(level, anchor, team);
+            if (crateRadio == null) {
+                BastionData byShulker =
+                    BastionManager.getInstance().findBastionByShulkerPos(anchor);
+                if (byShulker != null && team.equals(byShulker.getTeam())
+                    && byShulker.isActive()) {
+                    crateRadio = byShulker;
+                }
+            }
+            if (crateRadio != null && crateRadio.isActive() && crateRadio.isRadio()
+                && crateRadio.getLevel() == level) {
+                return crateRadio;
+            }
+        }
 
         // 优先：点击的 Radio 属于己方
         BastionData atClick = BastionManager.getInstance().findRadioByBlockPos(anchor);

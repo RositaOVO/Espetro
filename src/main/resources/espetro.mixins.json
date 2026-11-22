@@ -7,16 +7,35 @@
   "plugin": "org.espetro.mixin.EspetroMixinPlugin",
   "mixins": [
     "ServerGamePacketListenerWaitingLockMixin",
+    "network.KeepAliveTimeoutMixin",
+    "network.ClientReadTimeoutMixin",
+    "network.ServerReadTimeoutMixin",
     "hcrpoints.CapturePointAudioMixin",
     "hcrpoints.CapturePointNeutralizedAudioMixin",
     "tacz.CommonAssetsManagerMixin",
     "sbw.ChangeVehicleSeatMessageMixin",
+    "sbw.PlayerStopRidingMixin",
     "sbw.VehicleEntityMainBaseProtectionMixin",
     "sbw.VehicleEntitySeatAccessMixin",
     "sbw.VehicleEntityWreckMixin",
-    "sbw.TurretWreckEntityMixin"
+    "sbw.VehicleDriverLogoutKeepMixin",
+    "sbw.TurretWreckEntityMixin",
+    "sbw.CustomExplosionBlockGateMixin",
+    "sbw.SbwLevelDestroyBlockGateMixin",
+    "dragonrise.DragonVehicleLoginCleanupMixin",
+    "dragonrise.DragonVehicleDeployerIdleClearMixin"
   ],
-  "client": [],
+  "client": [
+    "client.EsRadialGlassMixin",
+    "sbw.ClickDismountMixin",
+    "sbw.MinecraftSeatMixin",
+    "sbw.VehicleChangeSeatDelayMixin",
+    "client.ClientLevelEntityRetryMixin",
+    "client.ClientLevelEntityRetryAccessor",
+    "client.SplashBufferSwapMixin",
+    "client.SplashStartupReloadMixin",
+    "client.SoundEngineStateAccessor"
+  ],
   "injectors": {
     "defaultRequire": 0
   },

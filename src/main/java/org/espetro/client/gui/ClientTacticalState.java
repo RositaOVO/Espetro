@@ -70,22 +70,22 @@ public final class ClientTacticalState {
         String key = key(playerName);
         MarkerInfo info = markersByName.get(key);
         if (commanderNames.contains(key) || (info != null && info.commander)) {
-            return EspetroMutilWidgets.GOLD;
+            return EspetroAuiWidgets.GOLD;
         }
         if (info != null && info.squadId == mySquadId && mySquadId != NO_SQUAD) {
-            return info.leader ? EspetroMutilWidgets.PURPLE : EspetroMutilWidgets.SQUAD_BLUE;
+            return info.leader ? EspetroAuiWidgets.PURPLE : EspetroAuiWidgets.SQUAD_BLUE;
         }
-        return EspetroMutilWidgets.TEXT;
+        return EspetroAuiWidgets.TEXT;
     }
 
     public static int getSquadMemberColor(int squadId, UnifiedDeployScreenPacket.SquadMemberInfo member) {
         if (member.commander || commanderNames.contains(key(member.playerName))) {
-            return EspetroMutilWidgets.GOLD;
+            return EspetroAuiWidgets.GOLD;
         }
         if (squadId == mySquadId && mySquadId != NO_SQUAD) {
-            return member.leader ? EspetroMutilWidgets.PURPLE : EspetroMutilWidgets.SQUAD_BLUE;
+            return member.leader ? EspetroAuiWidgets.PURPLE : EspetroAuiWidgets.SQUAD_BLUE;
         }
-        return EspetroMutilWidgets.TEXT;
+        return EspetroAuiWidgets.TEXT;
     }
 
     public static double getTeammateNameTagDistance() {
@@ -111,7 +111,7 @@ public final class ClientTacticalState {
      */
     public static boolean canLocalPlayerOpenTacticalRadial(String playerName) {
         MarkerInfo info = markersByName.get(key(playerName));
-        return hasSquadLeaderAccess(mySquadId, info);
+        return hasSquadLeaderAccess(mySquadId, info) || hasFireteamLeaderAccess(mySquadId, info);
     }
 
     /** ESPoints 标点轮盘仍允许指挥官、小队长和火力组长。 */
@@ -127,6 +127,19 @@ public final class ClientTacticalState {
             && info != null
             && info.squadId == localSquadId
             && info.leader;
+    }
+
+    /** 本地玩家是否是所在火力组的组长（火力组长可开轮盘建工事，但不能建电台/放队包）。 */
+    public static boolean isLocalFireteamLeader(String playerName) {
+        MarkerInfo info = markersByName.get(key(playerName));
+        return hasFireteamLeaderAccess(mySquadId, info);
+    }
+
+    static boolean hasFireteamLeaderAccess(int localSquadId, MarkerInfo info) {
+        return localSquadId != NO_SQUAD
+            && info != null
+            && info.squadId == localSquadId
+            && info.fireteamLeader;
     }
 
     private static String key(String name) {

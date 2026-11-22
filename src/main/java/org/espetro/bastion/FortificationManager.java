@@ -7,6 +7,7 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.Tag;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
@@ -58,6 +59,15 @@ public final class FortificationManager {
     private static final double PLACE_REACH = 6.0D;
     private static final long PREVIEW_LIFETIME_TICKS = 1_200L;
     private static final long WORK_INTERVAL_TICKS = 5L;
+    /**
+     * 同一工事部件两次受击的最短间隔（tick）。
+     *
+     * <p>爆炸会经由多条钩子（CustomExplosion 逐方块、ExplosionEvent.Detonate 兜底、
+     * 卓越前线自己的 level#destroyBlock）同时回调，必须去重；但**不能**像过去那样
+     * 「一个方块整场只吃一次伤害」，否则爆炸/炮弹对工事的累计伤害会被锁在上限的
+     * {@code (1 - 减免)}，表现为血条卡在固定百分比再也打不动。</p>
+     */
+    private static final long PART_DAMAGE_INTERVAL_TICKS = 2L;
     private static final FortificationManager INSTANCE = new FortificationManager();
 
     private final Map<UUID, Construction> constructions = new HashMap<>();
@@ -68,6 +78,25 @@ public final class FortificationManager {
     private final Map<UUID, Boolean> damageableEntityIndex = new HashMap<>();
     private final Map<UUID, PreviewSession> previews = new HashMap<>();
     private final Map<UUID, Long> lastWorkTick = new HashMap<>();
+    /** 部件的最近受击 tick（键为 {@link #posKey}），只用于爆炸去重。 */
+    private final Map<String, Long> lastPartDamageTick = new HashMap<>();
+    /**
+     * 单次爆炸的命中部件缓冲：同一次爆炸命中的部件先收集，再在 tick 末**一次性**结算。
+     *
+     * <p>过去是「每命中一个部件就扣一次」，而单件伤害是 {@code ceil(SV/部件数)}，
+     * 于是一次覆盖全部部件的爆炸总伤害恒等于 {@code SV × (1-减免)}——不管工事多大、
+     * 多少部件，爆炸减免 0.5 就是“两发必掉”，配置看上去完全没生效。现在总伤害只跟
+     * 覆盖比例与爆炸威力有关，减免只乘一次。</p>
+     */
+    private final Map<UUID, PendingExplosion> pendingExplosions = new HashMap<>();
+    /**
+     * 减免后不足 1 点的伤害余量（按工事累计）。
+     *
+     * <p>{@code projectile: 0.95} 时单件伤害只有 0.85 点，旧代码用 {@code Math.max(1, …)}
+     * 把它抬到 1 点，等于“配置成 0.95 和配置成 0 完全一样”。现在小数部分会累计，
+     * 取整后扣血。</p>
+     */
+    private final Map<UUID, Double> damageResidue = new HashMap<>();
     private final FortificationSpatialIndex spatialIndex = new FortificationSpatialIndex();
 
     private FortificationManager() {
@@ -77,9 +106,61 @@ public final class FortificationManager {
         return INSTANCE;
     }
 
+    /**
+     * 是否存在任何在建或已建工事。热重载会替换工事定义对象，
+     * 已有工事会失效，因此 {@code /espetro fort reload} 以此为门槛。
+     */
+    public boolean hasActiveConstructions() {
+        return !constructions.isEmpty() || !placed.isEmpty();
+    }
+
     public record PlacedFort(String fortId, String team, @Nullable UUID radioId,
                              String dimension, BlockPos pos, @Nullable UUID entityId,
                              UUID mapId) {
+    }
+
+    /**
+     * 已建成工事的只读快照（副本）。战术地图等外部集成从这里取固定武器位置，
+     * 不会看到内部 Map，也不会在遍历时因服务端线程增删而抛并发异常。
+     */
+    public List<PlacedFort> placedForts() {
+        return new ArrayList<>(placed.values());
+    }
+
+    /**
+     * 战术地图用的固定武器快照：只含 {@code fixed_weapon.enabled} 的工事。
+     * 判定复用与 {@link #isFixedWeaponEntity(Entity)} / F 轮盘完全相同的
+     * {@code def.fixedWeapon.enabled} 语义，不引入第二套规则。
+     * 定义已被热重载移除的残留工事会被跳过。
+     */
+    public List<PlacedFixedWeapon> placedFixedWeapons() {
+        List<PlacedFixedWeapon> result = new ArrayList<>();
+        for (PlacedFort fort : placedForts()) {
+            FortificationConfig.FortificationDef def = FortificationConfig.get(fort.fortId());
+            if (!isFixedWeaponDefinition(def)) continue;
+            result.add(new PlacedFixedWeapon(fort.fortId(), fort.team(), fort.dimension(),
+                fort.pos(), mapIconOf(def)));
+        }
+        return result;
+    }
+
+    /** 与 {@link #isFixedWeaponEntity(Entity)} 同一判定：{@code fixed_weapon.enabled}。 */
+    public static boolean isFixedWeaponDefinition(
+            @Nullable FortificationConfig.FortificationDef def) {
+        return def != null && def.fixedWeapon != null && def.fixedWeapon.enabled;
+    }
+
+    /** 编制里给该工事配置的战术地图图标文件名；缺省/空 = null，交给客户端默认映射。 */
+    @Nullable
+    private static String mapIconOf(FortificationConfig.FortificationDef def) {
+        if (def.mapIcon == null) return null;
+        String icon = def.mapIcon.trim();
+        return icon.isEmpty() ? null : icon;
+    }
+
+    /** 固定武器在地图上需要的最小信息（不含世界/区块引用）。 */
+    public record PlacedFixedWeapon(String fortId, String team, String dimension,
+                                    BlockPos pos, @Nullable String mapIcon) {
     }
 
     public record RadioConstructionProgress(int progress, int required) {
@@ -119,6 +200,9 @@ public final class FortificationManager {
         final Set<UUID> settledEntityParts = new HashSet<>();
         final UUID radioId;
         final UUID mapId;
+        /** 建造者所属编制 id（阵营）；null = 未分配编制。用于 {@code max_per_faction} 计数。 */
+        @Nullable
+        final String faction;
         int progress;
         int structuralValue;
         boolean complete;
@@ -128,7 +212,7 @@ public final class FortificationManager {
 
         Construction(Blueprint blueprint, String team, String dimension, BlockPos anchor,
                      Direction facing, List<WorldSlot> finalSlots, List<BlockPos> footprint,
-                     @Nullable UUID radioId) {
+                     @Nullable UUID radioId, @Nullable String faction) {
             this.blueprint = blueprint;
             this.team = team;
             this.dimension = dimension;
@@ -138,9 +222,14 @@ public final class FortificationManager {
             this.footprint = List.copyOf(footprint);
             this.radioId = radioId;
             this.mapId = stableMapId(dimension, anchor);
+            this.faction = faction;
         }
 
         int required() { return blueprint.profile.requiredProgress; }
+    }
+
+    /** 一次爆炸对某个工事的命中部件集合，{@code attacker} 取第一条命中的来源。 */
+    private record PendingExplosion(Set<BlockPos> parts, @Nullable Entity attacker) {
     }
 
     private record WorldSlot(int templateIndex, BlockPos pos, @Nullable BlockState state,
@@ -160,6 +249,7 @@ public final class FortificationManager {
         bastionIndex.clear();
         previews.clear();
         lastWorkTick.clear();
+        lastPartDamageTick.clear();
         spatialIndex.clear();
     }
 
@@ -182,6 +272,8 @@ public final class FortificationManager {
         if (blueprint == null) return "§c工事配置无效或缺少所需模组。";
         String roleError = validateSelectionRole(player, blueprint);
         if (roleError != null) return roleError;
+        String limitError = checkFactionLimit(player, blueprint.definition);
+        if (limitError != null) return limitError;
 
         UUID token = UUID.randomUUID();
         String dimension = player.level().dimension().location().toString();
@@ -219,7 +311,7 @@ public final class FortificationManager {
         String common = validateCommon(player);
         if (common != null) return common;
         if (facing == null || !facing.getAxis().isHorizontal()) return "§c无效的工事方向。";
-        if (facing != player.getDirection()) return "§c工事方向已变化，请重新对准后确认。";
+        // 朝向可以是玩家用 R 键旋转过的 4 个水平方向之一，因此不再要求等于视线方向。
         BlockPos serverTarget = raycastPlacePos(player);
         if (serverTarget == null || !serverTarget.equals(anchor)
             || player.getEyePosition().distanceToSqr(Vec3.atCenterOf(anchor)) > 64.0D) {
@@ -227,10 +319,12 @@ public final class FortificationManager {
         }
         String roleError = validateSelectionRole(player, preview.blueprint);
         if (roleError != null) return roleError;
+        String limitError = checkFactionLimit(player, preview.blueprint.definition);
+        if (limitError != null) return limitError;
 
         List<WorldSlot> finalSlots = transform(preview.blueprint.slots, anchor, facing);
         List<BlockPos> footprint = footprint(finalSlots);
-        if (!spaceIsClear(player.serverLevel(), finalSlots, player)) return "§c红色范围内存在方块或实体。";
+        if (!spaceIsClear(player.serverLevel(), finalSlots, player)) return "§c红色范围内存在实体（工事可以顶掉方块，但不能压在玩家/生物身上）。";
         for (WorldSlot slot : finalSlots) {
             if (positionIndex.containsKey(posKey(player.serverLevel(), slot.pos))) {
                 return "§c该空间已被其他工事占用。";
@@ -242,13 +336,31 @@ public final class FortificationManager {
         if (!debitBacking(player, preview.blueprint, backing, anchor)) return "§c建造资源不足。";
 
         Construction construction = new Construction(preview.blueprint, preview.team,
-            preview.dimension, anchor, facing, finalSlots, footprint, backing.radioId);
+            preview.dimension, anchor, facing, finalSlots, footprint, backing.radioId,
+            currentFaction(player));
         if (!placeFoundations(player.serverLevel(), construction, 0)) {
             refundBacking(player, preview.blueprint, backing);
             return "§c施工底座放置失败。";
         }
         registerConstruction(player.serverLevel(), construction);
         previews.remove(player.getUUID());
+        // instant 工事（如电台）：放置即建成，不走施工阶段
+        if (preview.blueprint.definition.construction.instant) {
+            construction.progress = construction.required();
+            if (complete(player.serverLevel(), construction, player)) {
+                sendProgress(player, construction, true);
+                player.sendSystemMessage(Component.literal("§a"
+                    + preview.blueprint.displayName + "§a 已直接建成，可立即使用。"));
+                return null;
+            }
+            // 最终空间被占用 → 退化为普通施工
+            construction.progress = 0;
+            updateFoundationStage(player.serverLevel(), construction);
+            sendProgress(player, construction, true);
+            player.sendSystemMessage(Component.literal(
+                "§e最终空间被占用，已改为普通施工：清空后按住工兵铲左键修建。"));
+            return null;
+        }
         sendProgress(player, construction, true);
         player.sendSystemMessage(Component.literal("§a施工范围已确认，按住工兵铲左键开始修建。"));
         return null;
@@ -264,6 +376,7 @@ public final class FortificationManager {
         UUID constructionId = positionIndex.get(posKey(level, target));
         Construction construction = constructionId == null ? null : constructions.get(constructionId);
         if (construction == null) return;
+        if (!canWork(player, construction, build)) return;
         applyWork(player, level, construction, build);
     }
 
@@ -276,7 +389,22 @@ public final class FortificationManager {
         Entity entity = level.getEntity(target);
         if (construction == null || entity == null || player.distanceToSqr(entity) > 49.0D
             || !player.hasLineOfSight(entity)) return;
+        if (!canWork(player, construction, build)) return;
         applyWork(player, level, construction, build);
+    }
+
+    /**
+     * 施工权限：己方可以修/建也可以拆；敌方只能拆（{@code build == false}）。
+     *
+     * <p>无队伍玩家（旁观者/管理员）不受限制，便于观战与地图编辑。</p>
+     */
+    private static boolean canWork(ServerPlayer player, Construction construction, boolean build) {
+        if (construction == null) return false;
+        if (!build) return true; // 拆除：敌我皆可
+        if (!isEnemyOf(player, construction.team)) return true;
+        player.displayClientMessage(
+            Component.literal("§c这是敌方工事，只能拆除，不能修复或继续建造。"), true);
+        return false;
     }
 
     private void applyWork(ServerPlayer player, ServerLevel level, Construction construction,
@@ -296,7 +424,9 @@ public final class FortificationManager {
             } else {
                 construction.structuralValue = Math.max(0, construction.structuralValue
                     - construction.blueprint.profile.removePerHit);
-                if (construction.structuralValue == 0) destroy(level, construction, player, true);
+                if (construction.structuralValue == 0) {
+                    destroy(level, construction, player, true, true, true);
+                }
             }
         } else if (build) {
             int old = construction.progress;
@@ -314,7 +444,9 @@ public final class FortificationManager {
             construction.progress = Math.max(0, construction.progress
                 - construction.blueprint.profile.removePerHit);
             if (!construction.complete) updateFoundationStage(level, construction);
-            if (construction.progress == 0) destroy(level, construction, player, true);
+            if (construction.progress == 0) {
+                destroy(level, construction, player, true, true, true);
+            }
         }
         if (constructions.containsKey(construction.id)) sendProgress(player, construction, build);
         else NetworkManager.NET.send(PacketDistributor.PLAYER.with(() -> player),
@@ -370,22 +502,72 @@ public final class FortificationManager {
         for (UUID id : spatialIndex.query(dimension, query)) {
             Construction construction = constructions.get(id);
             if (construction == null) continue;
-            List<BlockPos> parts = construction.complete
+            List<WorldSlot> parts = construction.complete
                 ? construction.finalSlots.stream()
                     .filter(slot -> slot.touch == FortificationTemplateCompiler.Touch.BLOCK)
-                    .map(WorldSlot::pos).toList()
-                : construction.footprint;
-            boolean changed = false;
-            for (BlockPos pos : parts) {
-                if (!hitPart.test(pos) || !construction.missing.add(pos.immutable())) continue;
-                changed = true;
-                damageConstruction(level, construction, pos, attacker, DamageKind.EXPLOSION);
-                if (!constructions.containsKey(construction.id)) break;
+                    .toList()
+                : List.of();
+            if (construction.complete) {
+                for (WorldSlot slot : parts) {
+                    BlockPos pos = slot.pos;
+                    if (!hitPart.test(pos)) continue;
+                    if (isCompletedRadioCore(construction, pos)) {
+                        destroy(level, construction, attacker, true);
+                        break;
+                    }
+                    markPartMissing(level, construction, slot, pos);
+                    noteExplosionHit(construction, pos, attacker);
+                }
+            } else {
+                for (BlockPos pos : construction.footprint) {
+                    if (!hitPart.test(pos)) continue;
+                    noteExplosionHit(construction, pos, attacker);
+                }
             }
-            if (changed
-                && construction.blueprint.definition.behaviorType
-                    == FortificationConfig.Behavior.RADIO
-                && constructions.containsKey(construction.id)) {
+        }
+    }
+
+    /** 记录一次爆炸对某工事的命中部件；真正的扣血在 {@link #settleExplosionDamage} 里按覆盖比例结算一次。 */
+    private void noteExplosionHit(Construction construction, BlockPos pos, @Nullable Entity attacker) {
+        PendingExplosion pending = pendingExplosions.get(construction.id);
+        if (pending == null) {
+            pending = new PendingExplosion(new LinkedHashSet<>(), attacker);
+            pendingExplosions.put(construction.id, pending);
+        }
+        pending.parts().add(pos.immutable());
+    }
+
+    /**
+     * tick 末统一结算本 tick 收集到的爆炸命中。
+     *
+     * <p>一次爆炸 = 一次结算：总伤害 = {@code explosion_damage × 覆盖比例}，再乘
+     * 一次 {@code damage_reduction.explosion}。覆盖比例按“命中部件数 / 可受伤部件数”算，
+     * 因此炸到 6 件沙袋墙的 2 件只有 1/3 伤害，而不再是每件各扣一次。</p>
+     */
+    public void settleExplosionDamage(MinecraftServer server) {
+        if (pendingExplosions.isEmpty() || server == null) return;
+        for (UUID id : new ArrayList<>(pendingExplosions.keySet())) {
+            PendingExplosion pending = pendingExplosions.remove(id);
+            if (pending == null) continue;
+            Construction construction = constructions.get(id);
+            if (construction == null) {
+                damageResidue.remove(id);
+                continue;
+            }
+            ServerLevel level = levelFor(construction);
+            if (level == null) {
+                damageResidue.remove(id);
+                continue;
+            }
+            int parts = construction.complete
+                ? damageablePartCount(construction)
+                : Math.max(1, construction.footprint.size());
+            double coverage = Math.min(1.0D, pending.parts().size() / (double) parts);
+            double raw = Math.max(0.0D,
+                construction.blueprint.definition.durability.explosionDamage) * coverage;
+            applyDamage(level, construction, pending.attacker(), DamageKind.EXPLOSION, raw);
+            if (constructions.containsKey(id)
+                && construction.blueprint.definition.behaviorType == FortificationConfig.Behavior.RADIO) {
                 FobSupplyTracker.notifyConstructionProgressChanged(
                     level, construction.anchor, construction.team);
             }
@@ -411,11 +593,53 @@ public final class FortificationManager {
             .filter(slot -> slot.pos.equals(pos)
                 && slot.touch == FortificationTemplateCompiler.Touch.BLOCK)
             .findFirst().orElse(null);
-        if (part == null || !construction.missing.add(pos.immutable())) return;
-        damageConstruction(level, construction, pos, attacker, kind);
+        if (part == null) return;
+        if (kind == DamageKind.EXPLOSION) {
+            // 爆炸走“tick 末按覆盖比例结算一次”，这里只登记命中；
+            // 同一次爆炸的多条钩子在同一个 tick 内由 PendingExplosion 的 Set 去重。
+            markPartMissing(level, construction, part, pos);
+            noteExplosionHit(construction, pos, attacker);
+            return;
+        }
+        if (!acceptPartDamage(level, construction, part, pos)) return;
+        applyDamage(level, construction, attacker, kind, partDamage(construction));
         if (construction.blueprint.definition.behaviorType == FortificationConfig.Behavior.RADIO
             && constructions.containsKey(construction.id)) {
             FobSupplyTracker.notifyConstructionProgressChanged(level, construction.anchor, construction.team);
+        }
+    }
+
+    /**
+     * 部件受击去重 + {@code missing} 维护。
+     *
+     * <p>冷却只挡同一 tick 里被多条爆炸钩子重复结算的同一次命中，不会把伤害锁死；
+     * {@code missing} 只记录「方块真的从世界上消失」的部件，否则修复时无法回填、
+     * 拆除时又会被 {@code clearFinalBlocks} 误跳过（工事血条到 0 但方块留在原地）。</p>
+     */
+    private boolean acceptPartDamage(ServerLevel level, Construction construction,
+                                     @Nullable WorldSlot part, @Nullable BlockPos pos) {
+        if (pos == null) return false;
+        long now = level.getGameTime();
+        String key = posKey(level, pos);
+        Long last = lastPartDamageTick.get(key);
+        if (last != null && now - last < PART_DAMAGE_INTERVAL_TICKS) return false;
+        lastPartDamageTick.put(key, now);
+        markPartMissing(level, construction, part, pos);
+        return true;
+    }
+
+    /**
+     * 部件方块真的从世界上消失时记进 {@code missing}。
+     *
+     * <p>爆炸改成一 tick 一次结算后不再走 {@link #acceptPartDamage} 的冷却，
+     * 但这段记录仍然要每次命中都做——否则修复时回填不回来、拆除时又会被跳过。</p>
+     */
+    private static void markPartMissing(ServerLevel level, Construction construction,
+                                        @Nullable WorldSlot part, @Nullable BlockPos pos) {
+        if (pos == null) return;
+        if (part != null && part.state != null
+            && !level.getBlockState(pos).equals(part.state)) {
+            construction.missing.add(pos.immutable());
         }
     }
 
@@ -427,7 +651,7 @@ public final class FortificationManager {
         if (construction == null || !Boolean.TRUE.equals(damageableEntityIndex.get(entityId))
             || construction.blueprint.kind == Kind.ENTITY
             || !construction.settledEntityParts.add(entityId)) return;
-        damageConstruction(level, construction, null, attacker, DamageKind.PROJECTILE);
+        applyDamage(level, construction, attacker, DamageKind.PROJECTILE, partDamage(construction));
     }
 
     /** Entity fortifications are a single integrity part. */
@@ -448,22 +672,49 @@ public final class FortificationManager {
             construction.structuralValue = 0;
             destroy(level, construction, null, true);
         } else {
-            damageConstruction(level, construction, null, null, DamageKind.DIRECT_BREAK);
+            applyDamage(level, construction, null, DamageKind.DIRECT_BREAK, partDamage(construction));
         }
     }
 
-    private void damageConstruction(ServerLevel level, Construction construction,
-                                    @Nullable BlockPos part, @Nullable Entity attacker,
-                                    DamageKind kind) {
+    private static boolean isCompletedRadioCore(Construction construction, @Nullable BlockPos pos) {
+        return pos != null
+            && construction.complete
+            && construction.blueprint.definition.behaviorType == FortificationConfig.Behavior.RADIO
+            && pos.equals(construction.anchor);
+    }
+
+    /**
+     * 单次命中的基础伤害：把工事总完整度摊到每个可受伤部件上。
+     *
+     * <p>只用于直击（{@link DamageKind#PROJECTILE}）、徒手/铲子拆除
+     * （{@link DamageKind#DIRECT_BREAK}）这类“一次只打到一件”的伤害；爆炸不按部件算，
+     * 见 {@link #settleExplosionDamage}。</p>
+     */
+    private static double partDamage(Construction construction) {
         int maximum = construction.complete
             ? construction.blueprint.definition.durability.structuralValue
             : construction.required();
         int parts = construction.complete ? damageablePartCount(construction)
             : Math.max(1, construction.footprint.size());
-        int baseDamage = Math.max(1, (int) Math.ceil((double) maximum / parts));
+        return Math.max(1.0D, Math.ceil((double) maximum / parts));
+    }
+
+    /**
+     * 结算一次伤害。
+     *
+     * <p>减免后允许出现不足 1 点的伤害：小数部分记在 {@link #damageResidue} 里累计，
+     * 攒够 1 点再扣。这样 {@code damage_reduction.projectile = 0.95} 才真的是“只吃 5%”，
+     * 而不是被 {@code Math.max(1, …)} 抬成“和 0 减免一模一样”。</p>
+     */
+    private void applyDamage(ServerLevel level, Construction construction, @Nullable Entity attacker,
+                             DamageKind kind, double rawDamage) {
+        if (rawDamage <= 0.0D) return;
         double reduction = construction.blueprint.definition.durability.damageReduction.forKind(kind);
-        int damage = reduction >= 1.0 ? 0
-            : Math.max(1, (int) Math.ceil(baseDamage * (1.0 - reduction)));
+        double effective = reduction >= 1.0D ? 0.0D : rawDamage * (1.0D - reduction);
+        if (effective <= 0.0D) return;
+        double banked = damageResidue.getOrDefault(construction.id, 0.0D) + effective;
+        int damage = (int) Math.floor(banked);
+        damageResidue.put(construction.id, banked - damage);
         if (damage <= 0) return;
         if (construction.complete) {
             construction.structuralValue = Math.max(0, construction.structuralValue - damage);
@@ -487,6 +738,108 @@ public final class FortificationManager {
 
     public boolean containsEntity(UUID entityId) {
         return entityId != null && entityIndex.containsKey(entityId);
+    }
+
+    /**
+     * 该位置工事的归属队伍（已是归一化写法）；不属于任何工事时返回 {@code null}。
+     */
+    @Nullable
+    public String teamAt(@Nullable ServerLevel level, @Nullable BlockPos pos) {
+        if (level == null || pos == null) {
+            return null;
+        }
+        UUID id = positionIndex.get(posKey(level, pos));
+        Construction c = id == null ? null : constructions.get(id);
+        return c == null ? null : c.team;
+    }
+
+    /**
+     * 该实体所属工事的队伍：结构实体查索引，工事生成的载具补给站读 PersistentData。
+     * 无归属时返回 {@code null}。
+     */
+    @Nullable
+    public String teamOfEntity(@Nullable Entity entity) {
+        if (entity == null) {
+            return null;
+        }
+        UUID id = entityIndex.get(entity.getUUID());
+        Construction c = id == null ? null : constructions.get(id);
+        if (c != null) {
+            return c.team;
+        }
+        // 兜底：completeEntity 会给工事实体打 espetro_team_<TEAM> 标签
+        for (String tag : entity.getTags()) {
+            if (tag != null && tag.startsWith("espetro_team_")) {
+                String team = tag.substring("espetro_team_".length()).trim();
+                if (!team.isEmpty()) {
+                    return team;
+                }
+            }
+        }
+        CompoundTag data = entity.getPersistentData();
+        if (data.contains(VehicleManager.SUPPLY_STATION_TEAM_KEY)) {
+            String team = data.getString(VehicleManager.SUPPLY_STATION_TEAM_KEY);
+            return team == null || team.isBlank() ? null : team;
+        }
+        return null;
+    }
+
+    /**
+     * 玩家是否是给定工事队伍以外的敌方。
+     *
+     * <p>无队伍的玩家（旁观者/管理员）一律按"非敌方"处理，避免影响观战与地图编辑。</p>
+     */
+    public static boolean isEnemyOf(@Nullable ServerPlayer player, @Nullable String ownerTeam) {
+        if (player == null || ownerTeam == null || ownerTeam.isBlank()) {
+            return false;
+        }
+        String myTeam = normalizeTeam(Espetro.getPlayerTeam(player));
+        return myTeam != null && !myTeam.equals(ownerTeam);
+    }
+
+    /** 该实体是否是"已启用固定武器"的工事实体。 */
+    public boolean isFixedWeaponEntity(@Nullable Entity entity) {
+        FortificationConfig.FortificationDef def = definitionOfEntity(entity);
+        return def != null && def.fixedWeapon != null && def.fixedWeapon.enabled;
+    }
+
+    /** 该实体所属工事的定义；不属于任何工事时返回 null。 */
+    @Nullable
+    public FortificationConfig.FortificationDef definitionOfEntity(@Nullable Entity entity) {
+        if (entity == null) {
+            return null;
+        }
+        UUID id = entityIndex.get(entity.getUUID());
+        Construction c = id == null ? null : constructions.get(id);
+        if (c != null) {
+            return c.blueprint.definition;
+        }
+        // 兜底：SBW 载具可能是多部件实体，玩家准星命中的子部件 UUID 不在索引里。
+        // 固定武器每件武器对应唯一实体类型，因此可以按实体类型回查定义。
+        return fixedWeaponDefinitionForType(entity.getType());
+    }
+
+    /** 按实体类型找"已启用的固定武器"定义（固定武器一件武器一种实体，类型即唯一键）。 */
+    @Nullable
+    public FortificationConfig.FortificationDef fixedWeaponDefinitionForType(@Nullable EntityType<?> type) {
+        if (type == null) {
+            return null;
+        }
+        ResourceLocation key = BuiltInRegistries.ENTITY_TYPE.getKey(type);
+        if (key == null) {
+            return null;
+        }
+        String id = key.toString();
+        for (FortificationConfig.FortificationDef def : FortificationConfig.list()) {
+            if (def == null || def.fixedWeapon == null || !def.fixedWeapon.enabled
+                || def.placement == null || def.placement.entityId == null) {
+                continue;
+            }
+            if (id.equalsIgnoreCase(def.placement.entityId.trim())) {
+                return def;
+            }
+        }
+        return null;
     }
 
     public boolean isFoundation(ServerLevel level, BlockPos pos) {
@@ -545,14 +898,111 @@ public final class FortificationManager {
     }
 
     public static boolean canUse(ServerPlayer player, FortificationConfig.FortificationDef def) {
+        if (player == null || def == null) {
+            return false;
+        }
         UUID uuid = player.getUUID();
+        boolean roleOk = false;
         for (String raw : def.usableBy == null ? List.<String>of() : def.usableBy) {
             String role = raw.toLowerCase(Locale.ROOT);
-            if ("commander".equals(role) && VoteManager.getInstance().isCommander(uuid)) return true;
-            if ("squad_leader".equals(role) && SquadManager.getInstance().isSquadLeader(uuid)) return true;
-            if ("fireteam_leader".equals(role) && SquadManager.getInstance().isFireteamLeader(uuid)) return true;
+            if ("commander".equals(role) && VoteManager.getInstance().isCommander(uuid)) { roleOk = true; break; }
+            if ("squad_leader".equals(role) && SquadManager.getInstance().isSquadLeader(uuid)) { roleOk = true; break; }
+            if ("fireteam_leader".equals(role) && SquadManager.getInstance().isFireteamLeader(uuid)) { roleOk = true; break; }
+        }
+        return roleOk && factionAllowed(player, def);
+    }
+
+    /**
+     * 编制限定检查：{@code requirements.factions} 为空 = 所有编制可用；
+     * 非空时只有列表内的编制可用（与角色 {@code usable_by} 是与关系）。
+     */
+    public static boolean factionAllowed(ServerPlayer player, FortificationConfig.FortificationDef def) {
+        if (player == null || def == null || def.requirements == null) {
+            return true;
+        }
+        List<String> allowed = def.requirements.factions;
+        if (allowed == null || allowed.isEmpty()) {
+            return true;
+        }
+        String factionId = org.espetro.team.ClassCountManager.getInstance()
+            .getPlayerFaction(player.getUUID());
+        if (factionId == null || factionId.isBlank()) {
+            return false;
+        }
+        for (String raw : allowed) {
+            if (raw != null && raw.equalsIgnoreCase(factionId)) {
+                return true;
+            }
         }
         return false;
+    }
+
+    /** 玩家当前编制（阵营）id；未分配时返回 null。 */
+    @Nullable
+    public static String currentFaction(@Nullable ServerPlayer player) {
+        if (player == null) return null;
+        try {
+            String faction = org.espetro.team.ClassCountManager.getInstance()
+                .getPlayerFaction(player.getUUID());
+            return faction == null || faction.isBlank() ? null : faction.trim();
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** 工事的"数量限制组"：{@code requirements.limit_group} 优先，否则用定义 id 自身。 */
+    public static String limitGroupOf(FortificationConfig.FortificationDef def) {
+        if (def == null) return "";
+        FortificationConfig.Requirements req = def.requirements;
+        if (req != null && req.limitGroup != null && !req.limitGroup.isBlank()) {
+            return req.limitGroup.trim();
+        }
+        return def.id == null ? "" : def.id;
+    }
+
+    /**
+     * 统计某阵营内当前**同时存在**（施工中 + 已建成）的同一限制组数量。
+     * 被摧毁/拆除的工事不在 {@code constructions} 中，因此自动释放名额。
+     */
+    public int countExistingForFaction(@Nullable FortificationConfig.FortificationDef def,
+                                       @Nullable String faction) {
+        if (def == null || faction == null) return 0;
+        String group = limitGroupOf(def);
+        if (group.isEmpty()) return 0;
+        int count = 0;
+        for (Construction c : constructions.values()) {
+            if (c == null || c.blueprint == null) continue;
+            if (c.faction == null || !faction.equalsIgnoreCase(c.faction)) continue;
+            if (group.equalsIgnoreCase(limitGroupOf(c.blueprint.definition))) count++;
+        }
+        return count;
+    }
+
+    /**
+     * 阵营数量上限校验；返回 null = 允许。
+     *
+     * @see FortificationConfig.Requirements#maxPerFaction
+     */
+    @Nullable
+    public String checkFactionLimit(@Nullable ServerPlayer player,
+                                    @Nullable FortificationConfig.FortificationDef def) {
+        if (def == null || def.requirements == null) return null;
+        int max = def.requirements.maxPerFaction;
+        if (max <= 0) return null;
+        String faction = currentFaction(player);
+        if (faction == null) return null;
+        String group = limitGroupOf(def);
+        int existing = countExistingForFaction(def, faction);
+        if (existing < max) return null;
+        String groupName = group.equals(def.id == null ? "" : def.id)
+            ? def.displayName : group;
+        return "§c" + groupName + " 在同一阵营内最多同时存在 " + max + " 座（当前已有 " + existing + " 座）。";
+    }
+
+    /** 建造轮盘用：该玩家是否因阵营数量上限暂时不能建这个工事（已满则不显示）。 */
+    public boolean isFactionLimitReached(@Nullable ServerPlayer player,
+                                         @Nullable FortificationConfig.FortificationDef def) {
+        return checkFactionLimit(player, def) != null;
     }
 
     public static boolean canOpenBuildMenu(ServerPlayer player) {
@@ -629,7 +1079,21 @@ public final class FortificationManager {
 
     @Nullable
     private String validateSelectionRole(ServerPlayer player, Blueprint blueprint) {
-        return canUse(player, blueprint.definition) ? null : "§c你没有权限建造该工事。";
+        if (!canUse(player, blueprint.definition)) {
+            return factionAllowed(player, blueprint.definition)
+                ? "§c你没有权限建造该工事。"
+                : "§c你的编制无法部署该工事。";
+        }
+        // 电台始终只允许指挥官/小队长：火力组长虽可建其它工事，但不能建电台
+        // （与 config/espetro/fortifications.json 的 usable_by 互为双保险）。
+        if (blueprint.definition.behaviorType == FortificationConfig.Behavior.RADIO) {
+            UUID uuid = player.getUUID();
+            if (!VoteManager.getInstance().isCommander(uuid)
+                && !SquadManager.getInstance().isSquadLeader(uuid)) {
+                return "§c只有小队长或指挥官才能部署电台。";
+            }
+        }
+        return null;
     }
 
     private record PlacementBacking(@Nullable BastionData radio, @Nullable UUID radioId,
@@ -647,8 +1111,12 @@ public final class FortificationManager {
             BastionManager manager = BastionManager.getInstance();
             String cooldown = manager.canBuildBastion(player.getUUID(), manager.getEffectiveRadioCooldownSeconds());
             if (cooldown != null) return new PlacementBacking(null, null, cooldown);
+            // 只统计“在建”的 Radio：已建成（c.complete）的 Radio 会保留在 constructions 里用于
+            // 追踪方块/血量，并且已经计入 getActiveBastionCount(team)；若这里再算一次就会把每个
+            // Radio 数两遍，导致上限 4 时实际只能放 2 个。
             long pending = constructions.values().stream().filter(c ->
-                c.blueprint.definition.behaviorType == FortificationConfig.Behavior.RADIO
+                !c.complete
+                    && c.blueprint.definition.behaviorType == FortificationConfig.Behavior.RADIO
                     && c.team.equals(preview.team)).count();
             if (manager.getActiveBastionCount(preview.team) + pending >= manager.getBastionLimitPerTeam()) {
                 return new PlacementBacking(null, null, "§c本方 Radio 数量已达到上限。" );
@@ -764,6 +1232,8 @@ public final class FortificationManager {
         PlacedFort fort = new PlacedFort(def.id, c.team, c.radioId, c.dimension, c.anchor,
             c.entityId, c.entityId == null ? c.mapId : c.entityId);
         placed.put(posKey(c.dimension, c.anchor), fort);
+        // 新工事可能带固定武器，战术地图快照需要重建。
+        org.espetro.api.EspetroAPI.markTacticalMapStateDirty();
         if (c.entityId != null) entityIndex.put(c.entityId, c.id);
         BastionData radio = c.radioId == null ? null : BastionManager.getInstance().getBastion(c.radioId);
         if (def.behaviorType == FortificationConfig.Behavior.AMMO_CRATE && radio != null) {
@@ -789,11 +1259,16 @@ public final class FortificationManager {
     }
 
     private void destroy(ServerLevel level, Construction c, @Nullable Entity actor, boolean removeWorld) {
-        destroy(level, c, actor, removeWorld, true);
+        destroy(level, c, actor, removeWorld, true, false);
     }
 
     private void destroy(ServerLevel level, Construction c, @Nullable Entity actor,
                          boolean removeWorld, boolean destroyBastionRecord) {
+        destroy(level, c, actor, removeWorld, destroyBastionRecord, false);
+    }
+
+    private void destroy(ServerLevel level, Construction c, @Nullable Entity actor,
+                         boolean removeWorld, boolean destroyBastionRecord, boolean shovelDismantle) {
         unregisterConstruction(c);
         if (removeWorld) {
             for (BlockPos pos : c.footprint) {
@@ -810,11 +1285,14 @@ public final class FortificationManager {
         if (destroyBastionRecord && c.bastionId != null) {
             BastionData bastion = BastionManager.getInstance().getBastion(c.bastionId);
             if (bastion != null) {
-                if (c.blueprint.definition.behaviorType == FortificationConfig.Behavior.RADIO
+                boolean radio = c.blueprint.definition.behaviorType == FortificationConfig.Behavior.RADIO;
+                boolean friendlyShovel = shovelDismantle
                     && actor instanceof ServerPlayer player
-                    && c.team.equals(normalizeTeam(Espetro.getPlayerTeam(player)))) {
+                    && c.team.equals(normalizeTeam(Espetro.getPlayerTeam(player)));
+                if (radio) {
                     BastionManager.getInstance().destroyBastionWithManpower(
-                        bastion, actor, false);
+                        bastion, actor,
+                        RadioLossPolicy.deductManpower(true, friendlyShovel, false));
                 } else {
                     BastionManager.getInstance().destroyBastion(bastion, actor);
                 }
@@ -822,6 +1300,8 @@ public final class FortificationManager {
         }
         PlacedFort fort = placed.remove(posKey(c.dimension, c.anchor));
         if (fort != null) {
+            // 工事消失后战术地图上的固定武器图标必须同步消失。
+            org.espetro.api.EspetroAPI.markTacticalMapStateDirty();
             VehicleManager.getInstance().unregisterMappedSupplyStation(fort.mapId());
             FortificationConfig.FortificationDef def = FortificationConfig.get(fort.fortId());
             if (def != null && def.behaviorType == FortificationConfig.Behavior.AMMO_CRATE
@@ -845,7 +1325,11 @@ public final class FortificationManager {
 
     private void unregisterConstruction(Construction c) {
         constructions.remove(c.id);
-        for (WorldSlot slot : c.finalSlots) positionIndex.remove(posKey(c.dimension, slot.pos), c.id);
+        for (WorldSlot slot : c.finalSlots) {
+            positionIndex.remove(posKey(c.dimension, slot.pos), c.id);
+            lastPartDamageTick.remove(posKey(c.dimension, slot.pos));
+        }
+        for (BlockPos pos : c.footprint) lastPartDamageTick.remove(posKey(c.dimension, pos));
         for (UUID entityId : c.spawnedEntities) {
             entityIndex.remove(entityId);
             damageableEntityIndex.remove(entityId);
@@ -856,6 +1340,8 @@ public final class FortificationManager {
         }
         if (c.bastionId != null) bastionIndex.remove(c.bastionId, c.id);
         spatialIndex.remove(c.id);
+        pendingExplosions.remove(c.id);
+        damageResidue.remove(c.id);
     }
 
     private static List<WorldSlot> transform(List<Slot> slots, BlockPos anchor, Direction facing) {
@@ -885,21 +1371,23 @@ public final class FortificationManager {
         return List.copyOf(result);
     }
 
+    /**
+     * 放置空间是否可用。
+     *
+     * <p>地图方块不再阻止放置：工事落地时会直接顶掉占位方块（见 {@link #placeFinalBlocks}），
+     * 因此这里只拦活体实体（放置者本人除外）。</p>
+     */
     private static boolean spaceIsClear(ServerLevel level, List<WorldSlot> slots, ServerPlayer placer) {
         for (WorldSlot slot : slots) {
-            BlockState state = level.getBlockState(slot.pos);
-            if (!isReplaceable(state)) return false;
             if (!level.getEntities((Entity) null, new AABB(slot.pos), entity -> entity != placer
                 && entity instanceof LivingEntity && entity.isAlive()).isEmpty()) return false;
         }
         return true;
     }
 
+    /** 完工空间是否可用：同样忽略地图方块，只拦活体实体。 */
     private static boolean completionSpaceAvailable(ServerLevel level, Construction c) {
         for (WorldSlot slot : c.finalSlots) {
-            BlockState state = level.getBlockState(slot.pos);
-            boolean foundation = c.footprint.contains(slot.pos) && state.is(BastionItems.ON_BUILDING_BLOCK);
-            if (!foundation && !isReplaceable(state)) return false;
             if (!level.getEntities((Entity) null, new AABB(slot.pos), entity -> entity instanceof LivingEntity
                 && entity.isAlive()).isEmpty()) return false;
         }
@@ -925,11 +1413,7 @@ public final class FortificationManager {
         BlockState state = BastionItems.ON_BUILDING_BLOCK.defaultBlockState()
             .setValue(OnBuildingBlock.STAGE, Math.max(0, Math.min(6, stage)));
         for (BlockPos pos : c.footprint) {
-            BlockState old = level.getBlockState(pos);
-            if (!isReplaceable(old)) {
-                restore(level, snapshots);
-                return false;
-            }
+            // 不再因为地图方块而拒绝：直接顶掉占位方块。先做快照，任何失败都整体回滚。
             snapshots.add(snapshot(level, pos));
             if (!level.setBlock(pos, state, 3)) {
                 restore(level, snapshots);
@@ -1013,8 +1497,10 @@ public final class FortificationManager {
 
     private void clearFinalBlocks(ServerLevel level, Construction c) {
         for (WorldSlot slot : c.finalSlots) {
+            // 不再跳过 missing：被炮弹扣过血但方块仍在原位的部件同样要拆干净，
+            // 否则工事结构值归零后地图上会留下一副拆不掉的「空壳」。
             if (slot.touch == FortificationTemplateCompiler.Touch.BLOCK
-                && !c.missing.contains(slot.pos) && level.hasChunkAt(slot.pos)
+                && level.hasChunkAt(slot.pos)
                 && slot.state != null && level.getBlockState(slot.pos).equals(slot.state)) {
                 level.setBlock(slot.pos, Blocks.AIR.defaultBlockState(), 3);
             }
@@ -1197,7 +1683,10 @@ public final class FortificationManager {
                 && b.getPosition().distSqr(radio.getPosition()) <= radiusSq) count++;
         }
         for (Construction c : constructions.values()) {
-            if (c.blueprint.definition.behaviorType == FortificationConfig.Behavior.HAB
+            // 已建成（c.complete）的 HAB 已经是 BastionData，上面那段已经数过；这里只数在建的，
+            // 否则每个 HAB 会被数两次，导致 max_habs_per_radio 实际上只有一半生效。
+            if (!c.complete
+                && c.blueprint.definition.behaviorType == FortificationConfig.Behavior.HAB
                 && radio.getBastionId().equals(c.radioId)) count++;
         }
         return count;

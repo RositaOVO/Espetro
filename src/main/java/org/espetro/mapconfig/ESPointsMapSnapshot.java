@@ -1,6 +1,5 @@
 package org.espetro.mapconfig;
 
-import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
@@ -13,7 +12,9 @@ import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 
 /**
- * 来自 EsConfig/ 目录的 ESPoints 战术地图和据点配置的冻结快照。
+ * Frozen EsConfig/ snapshot for ESPoints: tactical map background + raw
+ * CapturePoints.json. AAS/RAAS selection is performed by ESPoints itself
+ * using {@link #objectiveSeed} and the on-disk EsConfig path.
  */
 public final class ESPointsMapSnapshot {
 
@@ -31,12 +32,18 @@ public final class ESPointsMapSnapshot {
     public final String backgroundSha256;
     public final int backgroundWidth;
     public final int backgroundHeight;
+    /** Configured mode only ({@code AAS}/{@code RAAS}); lane is resolved by ESPoints. */
+    public final String objectiveMode;
+    public final String objectiveLane;
+    public final long objectiveSeed;
 
     private final byte[] background;
 
     private ESPointsMapSnapshot(String tacticalMapJson, String capturePointsJson,
                                 String backgroundImage, byte[] backgroundBytes,
-                                PngMetadata pngMeta) {
+                                PngMetadata pngMeta,
+                                String objectiveMode, String objectiveLane,
+                                long objectiveSeed) {
         this.tacticalMapJson = tacticalMapJson;
         this.capturePointsJson = capturePointsJson;
         this.backgroundImage = backgroundImage;
@@ -49,6 +56,9 @@ public final class ESPointsMapSnapshot {
         this.backgroundSha256 = pngMeta != null ? pngMeta.sha256 : "";
         this.backgroundWidth = pngMeta != null ? pngMeta.width : 0;
         this.backgroundHeight = pngMeta != null ? pngMeta.height : 0;
+        this.objectiveMode = objectiveMode == null ? "" : objectiveMode;
+        this.objectiveLane = objectiveLane == null ? "" : objectiveLane;
+        this.objectiveSeed = objectiveSeed;
     }
 
     public static ESPointsMapSnapshot load(Path esConfigDir) throws IOException {
@@ -77,19 +87,9 @@ public final class ESPointsMapSnapshot {
         }
         String captureJson = Files.readString(capturePath, StandardCharsets.UTF_8);
 
-        // 校验 CapturePoints.json 无重复据点名称
+        // 占点 AAS/RAAS 解析与选路由 ESPoints 权威执行；此处仅校验文件存在并保留原始 JSON。
         JsonObject captureObj = JsonParser.parseString(captureJson).getAsJsonObject();
-        if (captureObj.has("plannedPoints")) {
-            var seen = new java.util.HashSet<String>();
-            for (var elem : captureObj.getAsJsonArray("plannedPoints")) {
-                if (elem.isJsonObject()) {
-                    String name = elem.getAsJsonObject().get("name").getAsString();
-                    if (!seen.add(name)) {
-                        throw new IllegalArgumentException("CapturePoints.json 包含重复据点名称: " + name);
-                    }
-                }
-            }
-        }
+        String configuredMode = readConfiguredMode(captureObj);
 
         byte[] bgBytes = null;
         PngMetadata pngMeta = null;
@@ -102,7 +102,44 @@ public final class ESPointsMapSnapshot {
             pngMeta = validatePng(bgBytes, bgPath.getFileName().toString());
         }
 
-        return new ESPointsMapSnapshot(tacticalJson, captureJson, bgImage, bgBytes, pngMeta);
+        return new ESPointsMapSnapshot(tacticalJson, captureJson, bgImage, bgBytes,
+            pngMeta, configuredMode, "", 0L);
+    }
+
+    /**
+     * Stamps the per-round seed. CapturePoints selection is performed by ESPoints
+     * from {@code EsConfig/CapturePoints.json} using this seed.
+     */
+    public ESPointsMapSnapshot forRound(long seed) {
+        PngMetadata pngMeta = hasBackground()
+            ? new PngMetadata(backgroundWidth, backgroundHeight, backgroundSha256)
+            : null;
+        return new ESPointsMapSnapshot(
+            tacticalMapJson,
+            capturePointsJson,
+            backgroundImage,
+            background,
+            pngMeta,
+            objectiveMode,
+            "",
+            seed
+        );
+    }
+
+    private static String readConfiguredMode(JsonObject captureObj) {
+        if (captureObj == null || !captureObj.has("objectiveMode")) {
+            return "AAS";
+        }
+        String raw = captureObj.get("objectiveMode").getAsString().trim().toUpperCase();
+        if ("RAAS".equals(raw)) {
+            return "RAAS";
+        }
+        if ("AAS".equals(raw) || raw.isEmpty()) {
+            return "AAS";
+        }
+        // RANDOM 已废弃：配置应只写 AAS/RAAS
+        throw new IllegalArgumentException(
+            "objectiveMode 只能是 AAS 或 RAAS（已移除 RANDOM）: " + raw);
     }
 
     public boolean hasBackground() {

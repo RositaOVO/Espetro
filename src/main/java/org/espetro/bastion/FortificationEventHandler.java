@@ -6,6 +6,7 @@ import net.minecraft.world.item.Items;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.EntityHitResult;
 import net.minecraft.world.phys.HitResult;
+import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.ProjectileImpactEvent;
 import net.minecraftforge.event.entity.EntityLeaveLevelEvent;
 import net.minecraftforge.event.entity.player.PlayerInteractEvent;
@@ -53,9 +54,29 @@ public final class FortificationEventHandler {
             }
             radius += 1.5D;
         }
-        FortificationManager.getInstance().damageExplosion(level,
+        FortificationManager manager = FortificationManager.getInstance();
+        if (affected.isEmpty()) {
+            // 卓越前线的 CustomExplosion 会把方块表清空后再发事件（见 SuperbWarfareBlockGate），
+            // 这里退回“按坐标空间索引 + 半径”结算，否则高爆弹永远打不掉工事。
+            manager.damageNearby(level, explosion.getPosition(), (float) radius,
+                explosion.getIndirectSourceEntity());
+            return;
+        }
+        manager.damageExplosion(level,
             explosion.getPosition(), (float) radius, affected,
             explosion.getIndirectSourceEntity());
+    }
+
+    /**
+     * 每 tick 末把本 tick 收集到的爆炸命中按“一次爆炸 = 一次结算”扣血。
+     *
+     * <p>必须等一 tick：卓越前线的自研爆炸是逐方块回调的（{@code SuperbWarfareBlockGate}），
+     * 在原版 {@code Detonate} 路径里也拿不到“这一发到底覆盖了哪些部件”的完整集合。</p>
+     */
+    @SubscribeEvent
+    public static void onServerTickEnd(TickEvent.ServerTickEvent event) {
+        if (event.phase != TickEvent.Phase.END) return;
+        FortificationManager.getInstance().settleExplosionDamage(Espetro.getServer());
     }
 
     /** 炮弹/导弹等投射物直接命中工事方块或工事实体时扣除完整度。 */
@@ -63,12 +84,12 @@ public final class FortificationEventHandler {
     public static void onProjectileImpact(ProjectileImpactEvent event) {
         if (event.getEntity().level().isClientSide()
             || !(event.getEntity().level() instanceof ServerLevel level)) return;
-        // 只处理 superb_warfare 小口径炮弹及其派生（不含 TaCZ/步枪/机枪弹）
+        // 只处理 superb_warfare / dragonrise 的炮弹、火箭、航弹等投射物（不含 TaCZ/步枪/机枪弹）
         String projectileClass = event.getEntity().getClass().getName();
-        boolean smallCaliberShell =
-            "com.atsuishio.superbwarfare.entity.projectile.SmallCannonShellEntity".equals(projectileClass)
+        boolean sbwProjectile =
+            projectileClass.startsWith("com.atsuishio.superbwarfare.entity.projectile.")
                 || "com.redabysslucia.dragonrise_reforge.entities.projectile.AAshellEntity".equals(projectileClass);
-        if (!smallCaliberShell) return;
+        if (!sbwProjectile) return;
         HitResult ray = event.getRayTraceResult();
         net.minecraft.world.entity.Entity projectile = event.getEntity();
         net.minecraft.world.entity.Entity attacker = projectile instanceof net.minecraft.world.entity.projectile.Projectile p
@@ -135,6 +156,63 @@ public final class FortificationEventHandler {
             event.setCanceled(true);
             event.setCancellationResult(InteractionResult.SUCCESS);
         }
+    }
+
+    /**
+     * 敌方不得与己方工事的<strong>方块</strong>做任何交互（右键使用、开关、容器等都拦掉）。
+     *
+     * <p>拆除不算交互：破坏方块走 {@link #onBlockBroken} 的完整度伤害流程，
+     * 铁镐的左/右键施工由 {@link #guardShovelWork} 处理，都不受这里影响。</p>
+     */
+    @SubscribeEvent(priority = EventPriority.HIGH)
+    public static void onEnemyInteractBlock(PlayerInteractEvent.RightClickBlock event) {
+        if (event.getLevel().isClientSide()
+            || !(event.getLevel() instanceof ServerLevel level)
+            || !(event.getEntity() instanceof net.minecraft.server.level.ServerPlayer player)) {
+            return;
+        }
+        // 铁镐是施工工具：右键=拆除、左键=修复，交给 guardShovelWork / work 流程处理，
+        // 这里不能拦，否则敌方无法拆除己方工事。
+        if (player.getMainHandItem().getItem() == Items.IRON_SHOVEL) {
+            return;
+        }
+        String owner = FortificationManager.getInstance().teamAt(level, event.getPos());
+        if (!FortificationManager.isEnemyOf(player, owner)) {
+            return;
+        }
+        denyEnemyInteraction(event, player);
+    }
+
+    /** 敌方不得与己方工事的<strong>实体</strong>交互（结构实体、载具补给站等）。 */
+    @SubscribeEvent(priority = EventPriority.HIGH)
+    public static void onEnemyInteractEntity(PlayerInteractEvent.EntityInteract event) {
+        guardEnemyEntityInteraction(event, event.getTarget());
+    }
+
+    @SubscribeEvent(priority = EventPriority.HIGH)
+    public static void onEnemyInteractEntitySpecific(PlayerInteractEvent.EntityInteractSpecific event) {
+        guardEnemyEntityInteraction(event, event.getTarget());
+    }
+
+    private static void guardEnemyEntityInteraction(PlayerInteractEvent event,
+                                                    net.minecraft.world.entity.Entity target) {
+        if (event.getLevel().isClientSide()
+            || !(event.getEntity() instanceof net.minecraft.server.level.ServerPlayer player)) {
+            return;
+        }
+        String owner = FortificationManager.getInstance().teamOfEntity(target);
+        if (!FortificationManager.isEnemyOf(player, owner)) {
+            return;
+        }
+        denyEnemyInteraction(event, player);
+    }
+
+    private static void denyEnemyInteraction(PlayerInteractEvent event,
+                                             net.minecraft.server.level.ServerPlayer player) {
+        event.setCanceled(true);
+        event.setCancellationResult(InteractionResult.FAIL);
+        player.displayClientMessage(net.minecraft.network.chat.Component.literal(
+            "§c这是敌方工事，无法交互（只可拆除）。"), true);
     }
 
     @SubscribeEvent

@@ -509,6 +509,12 @@ public class FactionDataLoader {
         return classKits.get(classId);
     }
 
+    /** 该职业是否配置为医疗兵（{@code "med": true}）；未知职业或旧配置返回 false。 */
+    public boolean isMedicClass(String classId) {
+        ClassKitData kit = classId == null ? null : classKits.get(classId);
+        return kit != null && Boolean.TRUE.equals(kit.med);
+    }
+
     public ClassVariantData getClassVariant(String classId, String variantId) {
         ClassKitData kit = getClassKit(classId);
         return kit != null ? kit.getVariant(variantId) : null;
@@ -633,6 +639,12 @@ public class FactionDataLoader {
          */
         @SerializedName(value = "vehicle_crew", alternate = {"vehicleCrew"})
         public Boolean vehicleCrew;
+        /**
+         * 是否医疗兵：true 时该职业的玩家可在战场上看到倒地队友的头顶/地图标识。
+         * 配置键 {@code med}，缺省 false（不影响其他职业行为）。
+         */
+        @SerializedName(value = "med", alternate = {"medic", "is_medic"})
+        public Boolean med;
         /**
          * 完整文件系统路径的职业图标（优先于 {@link #icon}）。
          * 例：{@code /home/shu/图片/Icon/rifleman.png}，不是 jar 内 ResourceLocation。
@@ -868,6 +880,20 @@ public class FactionDataLoader {
          */
         @SerializedName(value = "nbt", alternate = {"entity_nbt", "entityNbt"})
         public String nbt;
+        /**
+         * 载具集装箱（物品栏）预置物品，语法与职业技能 commands 一致：
+         * {@code "<itemId>[<snbt>] <count>"}，例：
+         * {@code "items": ["superbwarfare:large_shell_ap 12", "superbwarfare:repair_tool{Energy:100000}"]}
+         * 由 VehicleManager 部署时通过 Forge ITEM_HANDLER 能力写入，载具没有集装箱则忽略。
+         */
+        @SerializedName(value = "items", alternate = {"cargo", "vehicle_items", "vehicleItems"})
+        public String[] items;
+        /**
+         * 未显式配置 {@link #items} 时，是否套用服务端 {@code data/<ns>/supply_station/} 的
+         * 补给站弹药配置（让载具一出生就带满弹药）。默认 true；填 false 则该车型不带弹药出生。
+         */
+        @SerializedName(value = "supply_loadout", alternate = {"supplyLoadout", "auto_ammo", "autoAmmo"})
+        public Boolean supplyLoadout;
         /** 单类载具的固定部署坐标配置。 */
         public VehicleDeploymentData deployment;
         /** 补给载具：可装载弹药和建材，默认容量 3000 */
@@ -885,6 +911,13 @@ public class FactionDataLoader {
         @SerializedName(value = "initial_deploy_delay_seconds",
             alternate = {"initialDeployDelaySeconds"})
         public InitialDeployDelayData initialDeployDelay;
+        /**
+         * 可选：该车型在战术地图上使用的图标文件名，例如 {@code "map_trackedheavyifv.png"}。
+         * 只写文件名（相对 {@code espoints:textures/gui/mark/friendly/}），不要写路径。
+         * 缺失/为空 = 沿用 EsPoints 的车型关键字兜底图标。
+         */
+        @SerializedName(value = "map_icon", alternate = {"mapIcon", "mapicon"})
+        public String mapIcon;
     }
 
     public static class InitialDeployDelayData {

@@ -1,6 +1,7 @@
 package org.espetro.client.gui;
 
-import se.mickelus.mutil.gui.*;
+import org.espetro.client.aui.GuiElement;
+import org.espetro.client.aui.GuiRect;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.network.chat.Component;
@@ -11,6 +12,7 @@ import org.espetro.network.NetworkManager;
 import org.espetro.network.UnifiedDeployScreenPacket;
 import org.espetro.network.GovernanceStatePacket;
 import org.espetro.network.GovernanceActionPacket;
+import org.espetro.team.CommanderSkillManager;
 import org.espetro.team.Fireteam;
 import org.espetro.team.GamePhase;
 import org.lwjgl.glfw.GLFW;
@@ -24,9 +26,15 @@ import java.util.regex.Pattern;
  *
  * Squad-style layout: squads | roles and spawn points | tactical map.
  */
-public class UnifiedDeployScreen extends MutilScreen {
+public class UnifiedDeployScreen extends EspetroMenuScreen {
 
     private static final int BTN_H = 12;
+    /** J 菜单内指挥官技能列（替代旧轮盘入口）。 */
+    private static final int SKILL_COL_W = 42;   // 2.5 倍后回到 42
+    private static final int SKILL_BTN_H = 50;   // 2.5 倍后回到 50
+    private static final int SKILL_BTN_GAP = 4;
+    private final List<SkillButton> skillButtons = new ArrayList<>();
+    private int lastSkillSignature = Integer.MIN_VALUE;
     private static final int CLASS_BTN_H = 22;
     private static final int CLASS_ICON_SIZE = 17;
     private static final int TITLE_H = 35;
@@ -36,6 +44,10 @@ public class UnifiedDeployScreen extends MutilScreen {
     private static final int INNER_PADDING = 3;
     private static final int SCROLLBAR_RESERVED_W = 6;
     private static final int SQUAD_ROW_H = 11;
+    /** 班组标题（组名框）行高：比动作按钮略高，便于容纳右侧"加入"按钮与更清晰的文字。 */
+    private static final int SQUAD_TITLE_ROW_H = SQUAD_ROW_H + 3;
+    /** 未入队时标题行右端"加入"按钮宽度。 */
+    private static final int SQUAD_JOIN_BTN_W = 32;
     private static final int SQUAD_MEMBER_ROW_H = 9;
     private static final int SQUAD_ACTION_ROW_H = 10;
     /** 身份色条与火力组色块同宽（像素），事件驱动静态绘制。 */
@@ -47,27 +59,63 @@ public class UnifiedDeployScreen extends MutilScreen {
     private static final int VARIANT_ROW_H = 28;
     private static final int VARIANT_MAX_VISIBLE = 6;
     private static final int SQUAD_ROW_GAP = 1;
+    /** 需求 3-3：载具信息上拉菜单 —— 宽度、行高、超过多少行启用滚动列表。 */
+    private static final int VEHICLE_POPUP_W = 168;
+    private static final int VEHICLE_POPUP_ROW_H = BTN_H + 2;
+    private static final int VEHICLE_POPUP_MAX_ROWS = 6;
+    /** 需求 3-3：就绪载具行的淡金高亮底（对应上拉菜单的"选中项高亮"观感）。 */
+    private static int vehicleRowReadyTintColor() { return UiTheme.CONTROL_SELECTED; }
     private static final float UI_TEXT_SCALE = 0.72f;
     private static final float TOOLTIP_TEXT_SCALE = 0.68f;
     private static final float SQUAD_TEXT_SCALE = 0.68f;
+    /** 需求 3-2：「创建/退出小队」与「队伍类型」上拉按钮共用同一字号（取两者都放得下的值后夹在此区间）。 */
+    private static final float SQUAD_ACTION_TEXT_SCALE_MIN = 0.6f;
+    private static final float SQUAD_ACTION_TEXT_SCALE_MAX = 0.8f;
     private static final float SQUAD_MEMBER_TEXT_SCALE = 0.64f;
+    /** 需求 7/9：「创建/退出」按钮宽度 = 动作区宽度的 1/5。 */
+    private static final int SQUAD_CREATE_BTN_W_DIV = 5;
+    /** 本轮需求 2：动作行所有按钮（创建/退出/队伍类型/解散/锁定）高度降为原先（2 倍行高）的一半。 */
+    private static final int SQUAD_CREATE_BTN_H_MUL = 1;
+    /** 创建小队按钮：正向语义色玻璃底（Tactical Glass 语义色）。 */
+    private static int squadCreateBgColor() { return UiTheme.POSITIVE_SOFT; }
+    private static int squadCreateBgHoverColor() { return UiTheme.withAlpha(UiTheme.POSITIVE, 0x30); }
+    /** 退出小队按钮：与创建小队同位置同尺寸，警示色玻璃底。 */
+    private static int squadLeaveBgColor() { return UiTheme.ATTACK_SOFT; }
+    private static int squadLeaveBgHoverColor() { return UiTheme.withAlpha(UiTheme.ATTACK, 0x30); }
+    /** 队伍类型上拉按钮：与其它菜单一致的中性玻璃底。 */
+    private static int squadCategoryBgColor() { return UiTheme.CONTROL_NORMAL; }
+    private static int squadCategoryBgHoverColor() { return UiTheme.CONTROL_HOVER; }
+    /** 内联「小队名称」输入框：内凹深底 + 亮字。 */
+    private static int squadInlineFieldBgColor() { return UiTheme.SUNKEN; }
+    private static int squadInlineFieldBgActiveColor() { return UiTheme.SURFACE_2; }
+    private static int squadInlineFieldTextColor() { return UiTheme.TEXT; }
+    private static int squadInlineFieldDimColor() { return UiTheme.TEXT_THIRD; }
+    /** 动作行内元素间距。 */
+    private static final int SQUAD_INLINE_GAP = 2;
+    /** 退出/解散等二次确认弹窗的深色底（外框略淡 + 内底更实；其它面板保持半透明玻璃）。 */
+    private static int squadConfirmOuterBgColor() { return UiTheme.alpha(UiTheme.BACKDROP_TOP, 0.86f); }
+    private static int squadConfirmInnerBgColor() { return UiTheme.GLASS_PANEL; }
 
-    // EspButton 颜色：全不透明，避免 isPauseScreen=false 时世界从按钮透出（Embeddium 叠影）。
-    private static final int BTN_BG_NORMAL   = 0xFF1B1E20;
-    private static final int BTN_BG_HOVER    = 0xFF435145;
-    private static final int BTN_BG_DISABLED = 0xFF181B1D;
-    private static final int CLASS_BG_UNAVAILABLE = 0xFF4A2024;
-    private static final int CLASS_BG_SELECTED   = 0xFF6A6A20;
-    private static final int CLASS_BORDER_UNAVAILABLE = 0xFF8A3A42;
-    private static final int BTN_BORDER      = 0xFF59605E;
-    private static final int BTN_TEXT        = 0xFFFFFF;
-    /** J 键主 GUI 的所有非地图背景统一使用不透明纯黑，避免世界画面穿透或色块交替闪烁。 */
-    private static final int CHROME_BG       = 0xFF000000;
-    private static final int PANEL_LEFT_BG   = 0xFF000000;
-    private static final int PANEL_CENTER_BG = 0xFF000000;
-    private static final int PANEL_MAP_FOOTER_BG = 0xFF000000;
-    private static final int SCREEN_SHADE    = 0xFF000000;
-    private static final int STATIC_DIVIDER = 0xFF3A3F3D;
+    // EspButton 颜色：统一圆角玻璃按钮；无自带底色的按钮使用半透明内凹底。
+    /** 控件采用与菜单一致的半透明底色。 */
+    private static int btnBgPlainBlackColor() { return UiTheme.CONTROL_NORMAL; }
+    private static int btnBgHoverColor() { return UiTheme.CONTROL_HOVER; }   // 悬停玻璃底
+    /** 禁用态：比常态更淡的玻璃底，禁用按钮依然可见。 */
+    private static int btnBgDisabledColor() { return UiTheme.CONTROL_DISABLED; }
+    private static int classBgUnavailableColor() { return UiTheme.ATTACK_SOFT; }
+    private static int classBgSelectedColor() { return UiTheme.SIGNAL_YELLOW; }
+    private static int classBorderUnavailableColor() { return UiTheme.withAlpha(UiTheme.ATTACK, 0x8C); }
+    private static int btnTextColor() { return UiTheme.TEXT; }
+    /** 重新部署按钮：警示色系（需二次确认）。 */
+    private static int redeployBgNormalColor() { return UiTheme.ATTACK_SOFT; }
+    private static int redeployBgHoverColor() { return UiTheme.withAlpha(UiTheme.ATTACK, 0x30); }
+    /** 面板底色：全部走玻璃令牌，不再出现裸 ARGB。 */
+    private static int chromeBgColor() { return UiTheme.GLASS_PANEL; }
+    private static int panelLeftBgColor() { return UiTheme.GLASS_PANEL; }
+    private static int panelCenterBgColor() { return UiTheme.GLASS_PANEL; }
+    private static int panelMapFooterBgColor() { return UiTheme.GLASS_PANEL; }
+    private static int screenShadeColor() { return UiTheme.withAlpha(UiTheme.BACKDROP_BOTTOM, 0xFF); }
+    private static int staticDividerColor() { return UiTheme.HAIRLINE_STRONG; }
     private static final Pattern COORDINATE_PATTERN =
         Pattern.compile("[-+]?\\d+(?:\\.\\d+)?");
     private static final ResourceLocation HAB_ICON =
@@ -124,6 +172,62 @@ public class UnifiedDeployScreen extends MutilScreen {
     /** MUtil 弹出层；必须始终作为根节点最后一个子元素以拦截下层点击。 */
     private GuiElement fireteamContextRoot;
 
+    // ===== 班组栏底部动作行（改版后单行：创建/退出 + 解散 / 锁定）=====
+    /** 动作按钮专用容器：数据原地刷新时只重建这一小块。 */
+    private GuiElement squadActionRoot;
+    private int squadActionX;
+    private int squadActionY;
+    private int squadActionW;
+    private EspButton squadDisbandButton;
+    private EspButton squadLockButton;
+    private EspButton squadCreateLeaveButton;
+
+    // ===== 班组栏内联创建（未入队）：名称输入框 + 队伍类型上拉菜单（替代旧创建小窗）=====
+    /** 内联「小队名称」输入框。 */
+    private SquadInlineNameField squadInlineNameField;
+    /** 输入框草稿：班组栏因数据刷新整块重建时保留已输入名称。 */
+    private String squadInlineName = "";
+    /** 输入框是否处于输入焦点（跨整块重建保留）。 */
+    private boolean squadInlineNameTyping;
+    /** 上次创建发包时间：防连点重复创建。 */
+    private long squadCreateSentAtMs;
+    /** 黄色「队伍类型」上拉按钮（未入队时显示在输入框右侧）。 */
+    private EspButton squadCategoryDropButton;
+    private int squadCategoryButtonX;
+    private int squadCategoryButtonY;
+    private int squadCategoryButtonW;
+    private int squadCategoryButtonH;
+
+    // ===== 载具信息上拉菜单（需求 3-3：取代原独立/常驻的载具信息窗口）=====
+    /** 「载具信息」上拉按钮（对战阶段位于地图页脚）。 */
+    private EspButton vehicleInfoDropButton;
+    private int vehicleInfoButtonX;
+    private int vehicleInfoButtonY;
+    private int vehicleInfoButtonW;
+    private int vehicleInfoButtonH;
+    /** 载具信息上拉菜单层（全屏半透明遮罩 + 按钮上方的选项列表）。 */
+    private GuiElement vehicleInfoRoot;
+    /** 载具较多时启用的滚动列表（保留滚动位置）。 */
+    private ScrollableList vehicleInfoScrollList;
+    /** 面板包携带的载具快照（为空时菜单显示空态）。 */
+    private List<UnifiedDeployScreenPacket.VehicleInfo> vehicleInfos = new ArrayList<>();
+    /** 载具快照收到的时刻：包内冷却为秒，本地据此继续倒数。 */
+    private long vehicleInfoReceivedAtMs;
+    /** 菜单行按钮 ↔ 载具：每秒只刷文案，不重建结构、不丢滚动位置。 */
+    private final List<EspButton> vehicleInfoRowButtons = new ArrayList<>();
+    private final List<UnifiedDeployScreenPacket.VehicleInfo> vehicleInfoRowVehicles = new ArrayList<>();
+
+    // ===== 班组弹层：队伍类型上拉菜单 / 通用确认框 =====
+    /** 当前选中的队伍类型 id（上拉菜单选中项）。 */
+    private String squadCreateCategoryId = "none";
+    /** 队伍类型上拉菜单层（替代旧的创建小窗，最后添加以拦截下层点击）。 */
+    private GuiElement squadCategoryRoot;
+    /** 通用确认框（退出/解散/踢人复用）；默认高亮"取消"以防误触。 */
+    private GuiElement squadConfirmRoot;
+    private String squadConfirmTitle = "";
+    private String squadConfirmBody = "";
+    private Runnable squadConfirmAction;
+
     // ===== 按钮引用 =====
     private final List<EspButton> classButtons = new ArrayList<>();
     private final Map<EspButton, Integer> classButtonToClassIndex = new HashMap<>();
@@ -150,6 +254,13 @@ public class UnifiedDeployScreen extends MutilScreen {
     private PlainText troopCountText;
     private PlainText phaseTitleText;
     private PlainText governanceTimerText;
+    /** 指挥官空缺治理小窗是否已关闭（最小化为「载具信息」右侧的按钮）。 */
+    private boolean governanceWindowMinimized;
+    /** 指挥官空缺治理小窗宽度/标题区高度。 */
+    private static final int VACANCY_WINDOW_W = 186;
+    /** 弹劾投票小窗（"原指挥官 / 挑战者"两行按钮，略宽）。 */
+    private static final int IMPEACH_WINDOW_W = 210;
+    private static final int VACANCY_WINDOW_HEADER_H = 26;
     private String pendingDeployPosition;
     private String pendingDeployCommand;
     private final Set<Integer> expandedSquadIds = new HashSet<>();
@@ -176,6 +287,11 @@ public class UnifiedDeployScreen extends MutilScreen {
     private ScrollableList classScrollList;
     private ScrollableList deployScrollList;
     private ScrollableList squadScrollList;
+    private ThemeViewState themeViewState;
+
+    private record ThemeViewState(double squads, double classes, double deploys,
+                                  boolean categoriesOpen, boolean vehiclesOpen, double vehicles,
+                                  String confirmationTitle, String confirmationBody, Runnable confirmation) { }
 
     // ===== 可独立重建的区域容器 =====
     private GuiElement squadSectionRoot;
@@ -193,7 +309,7 @@ public class UnifiedDeployScreen extends MutilScreen {
     private int mapX, mapY, mapW, mapH;
 
     public UnifiedDeployScreen(UnifiedDeployScreenPacket data) {
-        super(Component.literal("部署面板"));
+        super(Component.literal("战术面板"));
         this.factionId = data.getFactionId();
         this.factionName = data.getFactionName();
         this.factionDescription = data.getFactionDescription();
@@ -210,6 +326,10 @@ public class UnifiedDeployScreen extends MutilScreen {
         this.isCommander = data.isCommander();
         this.squads = new ArrayList<>(data.getSquads());
         this.squadCategories = new ArrayList<>(data.getSquadCategories());
+        // 需求 3-3：载具信息改由面板内上拉菜单展示，数据取统一面板包里的载具快照。
+        this.vehicleInfos = new ArrayList<>(
+            data.getVehicles() == null ? List.of() : data.getVehicles());
+        this.vehicleInfoReceivedAtMs = System.currentTimeMillis();
         this.mySquadId = data.getMySquadId();
         this.team = data.getTeam();
         this.selectedClassId = normalizeSelectedClassId(data.getSelectedClassId());
@@ -225,6 +345,67 @@ public class UnifiedDeployScreen extends MutilScreen {
         this.deployTimeRemaining = seconds;
         this.deployTimerAnchorSeconds = seconds;
         this.deployTimerAnchorMs = System.currentTimeMillis();
+    }
+
+    /**
+     * 需求 3-3：载具快照更新（面板已打开时由服务端推送）。列表变化时刷新按钮文案；
+     * 菜单开着则就地重建选项列表。
+     */
+    public void updateVehicles(List<UnifiedDeployScreenPacket.VehicleInfo> nextVehicles) {
+        List<UnifiedDeployScreenPacket.VehicleInfo> next = nextVehicles == null
+            ? List.of() : new ArrayList<>(nextVehicles);
+        if (vehicleInfosEqual(vehicleInfos, next)) {
+            return;
+        }
+        boolean rowsChanged = !vehicleRowSignatureEqual(vehicleInfos, next);
+        vehicleInfos = new ArrayList<>(next);
+        vehicleInfoReceivedAtMs = System.currentTimeMillis();
+        // bug 修复：数据变化也只就地刷新 —— 绝不 close→reopen（那会丢打开状态与滚动位置）。
+        refreshVehicleInfoPopup();
+        if (rowsChanged && hasVehicleInfoPopup()) {
+            refreshVehicleInfoPopupLayout(true);
+        }
+    }
+
+    /**
+     * 行集合是否变化（类型/名称/上限/刷新周期）：
+     * 只有它变了才需要重建行按钮；仅有 current 变化时原地改文案即可。
+     */
+    private static boolean vehicleRowSignatureEqual(List<UnifiedDeployScreenPacket.VehicleInfo> a,
+                                                    List<UnifiedDeployScreenPacket.VehicleInfo> b) {
+        if (a.size() != b.size()) {
+            return false;
+        }
+        for (int i = 0; i < a.size(); i++) {
+            UnifiedDeployScreenPacket.VehicleInfo x = a.get(i);
+            UnifiedDeployScreenPacket.VehicleInfo y = b.get(i);
+            if (!Objects.equals(x.type, y.type)
+                || !Objects.equals(x.displayName, y.displayName)
+                || x.max != y.max
+                || x.respawnMinutes != y.respawnMinutes) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean vehicleInfosEqual(List<UnifiedDeployScreenPacket.VehicleInfo> a,
+                                             List<UnifiedDeployScreenPacket.VehicleInfo> b) {
+        if (a.size() != b.size()) {
+            return false;
+        }
+        for (int i = 0; i < a.size(); i++) {
+            UnifiedDeployScreenPacket.VehicleInfo x = a.get(i);
+            UnifiedDeployScreenPacket.VehicleInfo y = b.get(i);
+            if (!Objects.equals(x.type, y.type)
+                || !Objects.equals(x.displayName, y.displayName)
+                || x.max != y.max
+                || x.current != y.current
+                || x.respawnMinutes != y.respawnMinutes) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -500,9 +681,16 @@ public class UnifiedDeployScreen extends MutilScreen {
     }
 
     public void updateDeploymentState(boolean waitingForSelection, int redeployCooldownRemaining) {
+        boolean columnLayoutChanged = this.waitingForDeploySelection != waitingForSelection;
         this.waitingForDeploySelection = waitingForSelection;
         this.outpostRedeployCooldownEndsAt = System.currentTimeMillis()
             + Math.max(0, redeployCooldownRemaining) * 1000L;
+        if (columnLayoutChanged && root != null) {
+            // 职业/部署点栏在「等待部署 ⇄ 已部署」间切换显隐与几何：
+            // 重建整树（populateGui 依据新 waiting 状态决定是否构建中栏），
+            // 下一 tick 生效，旧按钮树随即被整体替换。
+            rebuildMenuRoot();
+        }
         refreshDeployButtonStates();
     }
 
@@ -612,17 +800,65 @@ public class UnifiedDeployScreen extends MutilScreen {
 
     // ==================== 自定义按钮 ====================
 
+    /** 职业分类图标：黄色渲染（用于每排左侧）。 */
+    private static class CategoryIcon extends GuiElement {
+        private final ResourceLocation texture;
+
+        CategoryIcon(ResourceLocation texture, int x, int y, int size) {
+            super(x, y, size, size);
+            this.texture = texture;
+        }
+
+        @Override
+        public void draw(GuiGraphics graphics, int x, int y, int w, int h, int mx, int my, float tick) {
+            if (!isVisible() || texture == null) {
+                return;
+            }
+            int size = getWidth();
+            UiPaint.tint(graphics, UiTheme.SIGNAL_YELLOW);
+            graphics.blit(texture, x + getX(), y + getY(), size, size, 0.0f, 0.0f, 128, 128, 128, 128);
+            graphics.setColor(1.0f, 1.0f, 1.0f, 1.0f);
+        }
+    }
+
+    /** 一条细横线（用于职业排之间）：默认 1px，可指定更粗的线（需求 7）。 */
+    private static class Divider extends GuiElement {
+        private final int color;
+        private final int thickness;
+
+        Divider(int x, int y, int width, int color) {
+            this(x, y, width, color, 1);
+        }
+
+        Divider(int x, int y, int width, int color, int thickness) {
+            super(x, y, Math.max(1, width), Math.max(1, thickness));
+            this.color = color;
+            this.thickness = Math.max(1, thickness);
+        }
+
+        @Override
+        public void draw(GuiGraphics graphics, int x, int y, int w, int h, int mx, int my, float tick) {
+            if (!isVisible()) {
+                return;
+            }
+            graphics.fill(x + getX(),
+                y + getY() + (thickness > 1 ? (thickness - 1) / 2 : 0),
+                x + getX() + getWidth(),
+                y + getY() + (thickness > 1 ? (thickness + 1) / 2 : 1), color);
+        }
+    }
+
     private static class EspButton extends GuiElement {
         private final Runnable action;
         private String label;
         private boolean enabled = true;
         private boolean hovered = false;
-        private int normalColor = BTN_BG_NORMAL;
-        private int hoverColor = BTN_BG_HOVER;
-        private int disabledColor = BTN_BG_DISABLED;
-        private int disabledBorderColor = 0x60383848;
-        private int disabledTextColor = 0x666666;
-        private int textColor = BTN_TEXT;
+        private int normalColor = btnBgPlainBlackColor();
+        private int hoverColor = btnBgHoverColor();
+        private int disabledColor = btnBgDisabledColor();
+        private int disabledBorderColor = UiTheme.TEXT_DISABLED;
+        private int disabledTextColor = UiTheme.TEXT_DISABLED;
+        private int textColor = btnTextColor();
         private ResourceLocation icon;
         private int iconTextureWidth = 128;
         private int iconTextureHeight = 128;
@@ -630,6 +866,10 @@ public class UnifiedDeployScreen extends MutilScreen {
         private String rightLabel = "";
         private float textScale = UI_TEXT_SCALE;
         private boolean centeredText = true;
+        /** 非 0 表示已选中，画成该底色。 */
+        private int selectedColor = 0;
+        /** true 时保留常态底色，只把 selectedColor 淡淡叠在上面。 */
+        private boolean selectedOverlay = false;
         /** 禁用态仍可点击以弹出原因说明（如选职拒绝）。 */
         private Runnable disabledAction;
 
@@ -658,6 +898,27 @@ public class UnifiedDeployScreen extends MutilScreen {
         void setRightLabel(String value) { rightLabel = value == null ? "" : value; }
         void setTextScale(float scale) { textScale = Math.max(0.5f, Math.min(1.0f, scale)); }
         void setCenteredText(boolean centered) { centeredText = centered; }
+
+        /**
+         * 需求 6：黑色半透明平底按钮 —— 原来"有边框、没底色"的按钮统一改用它。
+         * 边框已全局不再绘制，这里只负责铺上统一的黑半透底。
+         */
+        /** 保留旧调用入口，统一采用无边框玻璃三态。 */
+        void setTransparentIdle() {
+            normalColor = UiTheme.CONTROL_NORMAL;
+            hoverColor = UiTheme.CONTROL_HOVER;
+        }
+
+        void setPlainBlack() { normalColor = btnBgPlainBlackColor(); }
+
+        void setSelected(boolean selected, int color) { setSelected(selected, color, false); }
+
+        /** overlay=true：先铺常态底色，再把选中色叠上去（用于"很淡的白底"这种轻提示）。 */
+        void setSelected(boolean selected, int color, boolean overlay) {
+            selectedColor = selected ? color : 0;
+            selectedOverlay = selected && overlay;
+        }
+        /** 禁用态样式；border 参数在需求 6（全局去边框）后不再绘制，保留以兼容现有调用点。 */
         void setDisabledStyle(int background, int border, int text) {
             disabledColor = background;
             disabledBorderColor = border;
@@ -685,35 +946,50 @@ public class UnifiedDeployScreen extends MutilScreen {
 
             int bx = x + getX(), by = y + getY(), bw = getWidth(), bh = getHeight();
 
-            int bgCol;
-            if (!enabled) bgCol = disabledColor;
-            else if (hovered) bgCol = hoverColor;
-            else bgCol = normalColor;
-            graphics.fill(bx, by, bx + bw, by + bh, bgCol);
+            // 选中 > 禁用 > 悬停 > 常态；平涂无描边（边框在悬停/选中等所有状态下都不画）
+            boolean selected = selectedColor != 0;
+            // 选中态永远按"可用"渲染：职业一旦被选中，即便当前人数已满或冷却中也不灰显。
+            boolean displayEnabled = enabled || selected;
+            int fill = selected ? selectedColor
+                : !displayEnabled ? disabledColor : hovered ? hoverColor : normalColor;
+            if (selected && selectedColor == UiTheme.SIGNAL_YELLOW) {
+                graphics.fill(bx, by, bx + bw, by + bh, UiTheme.SIGNAL_YELLOW);
+            } else {
+                UiPaint.glassPanel(graphics, bx, by, bw, bh, fill);
+            }
 
-            int borderCol = !enabled
-                ? disabledBorderColor : (hovered ? 0xFF9999BB : BTN_BORDER);
-            graphics.renderOutline(bx, by, bw, bh, borderCol);
-
-            int textCol = enabled ? textColor : disabledTextColor;
+            int textCol = selected && selectedColor == UiTheme.SIGNAL_YELLOW
+                ? UiTheme.TEXT_ON_SIGNAL : displayEnabled ? textColor : disabledTextColor;
             int contentLeft = bx + 3;
             if (icon != null) {
                 int drawnIconSize = Math.min(iconSize, bh - 3);
+                // Role textures contain a white glyph and a dark outline, not a monochrome mask.
+                // Preserve the original full-brightness artwork for the selected role, even when full.
+                UiPaint.tint(graphics, selected && selectedColor == UiTheme.SIGNAL_YELLOW
+                    ? UiTheme.TEXTURE_WHITE : displayEnabled ? UiTheme.TEXT : UiTheme.TEXT_DISABLED);
+                // 需求 3-4：禁用态不再铺底色，改为把图标压暗，仍能区分可用 / 不可用
+                if (!displayEnabled) {
+                    graphics.setColor(0.45f, 0.45f, 0.45f, 1.0f);
+                }
                 graphics.blit(icon, bx + 2, by + (bh - drawnIconSize) / 2,
                     drawnIconSize, drawnIconSize, 0.0f, 0.0f,
                     iconTextureWidth, iconTextureHeight, iconTextureWidth, iconTextureHeight);
+                graphics.setColor(1.0f, 1.0f, 1.0f, 1.0f);
                 contentLeft = bx + drawnIconSize + 4;
             }
             int rightLabelWidth = rightLabel.isEmpty() ? 0 : Math.round(
                 Minecraft.getInstance().font.width(
-                    EspetroMutilWidgets.stripFormatting(rightLabel)) * textScale);
+                    EspetroAuiWidgets.stripFormatting(rightLabel)) * textScale);
             int rightLabelX = bx + bw - 3 - rightLabelWidth;
             int availableTextWidth = Math.max(8,
                 rightLabelX - (rightLabel.isEmpty() ? 0 : 4) - contentLeft);
             int logicalTextWidth = Math.max(8, (int) (availableTextWidth / textScale));
-            String drawnLabel = EspetroMutilWidgets.trimToWidth(label, logicalTextWidth);
+            String drawnLabel = EspetroAuiWidgets.trimToWidth(label, logicalTextWidth);
+            if (selected && selectedColor == UiTheme.SIGNAL_YELLOW) {
+                drawnLabel = EspetroAuiWidgets.stripFormatting(drawnLabel);
+            }
             int textWidth = Math.round(Minecraft.getInstance().font.width(
-                EspetroMutilWidgets.stripFormatting(drawnLabel)) * textScale);
+                EspetroAuiWidgets.stripFormatting(drawnLabel)) * textScale);
             int textX = centeredText
                 ? contentLeft + Math.max(0, (availableTextWidth - textWidth) / 2)
                 : contentLeft;
@@ -721,7 +997,8 @@ public class UnifiedDeployScreen extends MutilScreen {
             drawScaledString(graphics, drawnLabel, textX,
                 by + Math.max(0, (bh - textHeight) / 2), textCol, textScale);
             if (!rightLabel.isEmpty()) {
-                drawScaledString(graphics, rightLabel, rightLabelX,
+                drawScaledString(graphics, selected && selectedColor == UiTheme.SIGNAL_YELLOW
+                        ? EspetroAuiWidgets.stripFormatting(rightLabel) : rightLabel, rightLabelX,
                     by + Math.max(0, (bh - textHeight) / 2), textCol, textScale);
             }
         }
@@ -770,22 +1047,26 @@ public class UnifiedDeployScreen extends MutilScreen {
             int bx = x + getX();
             int by = y + getY();
             int bar = SQUAD_ACCENT_BAR_W;
-            graphics.fill(bx, by, bx + getWidth(), by + getHeight(),
-                hasFocus() ? 0xF0404743 : 0xE0141617);
-            // 最左：火力组色块
-            graphics.fill(bx, by, bx + bar, by + getHeight(), fireteamColor);
+            int rowRadius = UiTheme.RADIUS_INNER;
+            // 班组成员行：只留一层玻璃底色，不画描边（常态/悬停都不画）。
+            UiPaint.roundRect(graphics, bx, by, getWidth(), getHeight(), rowRadius,
+                hasFocus() ? UiTheme.CONTROL_HOVER : UiTheme.GLASS_PANEL_SOFT);
+            // 最左：火力组色条（圆角胶囊）
+            UiPaint.roundRect(graphics, bx + 1, by + 2, bar, Math.max(1, getHeight() - 4), 1,
+                fireteamColor);
             // 紧邻：阵营内身份色条（金指挥官 / 紫队长 / 蓝队员）
-            graphics.fill(bx + bar, by, bx + bar * 2, by + getHeight(), roleAccentColor);
+            UiPaint.roundRect(graphics, bx + bar + 1, by + 2, Math.max(1, bar / 2),
+                Math.max(1, getHeight() - 4), 1, roleAccentColor);
 
             int textX = bx + bar * 2 + 3;
             int availableWidth = Math.max(8, getWidth() - (bar * 2 + 5));
-            String drawnLabel = EspetroMutilWidgets.trimToWidth(
+            String drawnLabel = EspetroAuiWidgets.trimToWidth(
                 label, (int) (availableWidth / SQUAD_MEMBER_TEXT_SCALE));
             int textHeight = Math.max(1,
                 Math.round(Minecraft.getInstance().font.lineHeight * SQUAD_MEMBER_TEXT_SCALE));
             drawScaledString(graphics, drawnLabel, textX,
                 by + Math.max(0, (getHeight() - textHeight) / 2),
-                BTN_TEXT, SQUAD_MEMBER_TEXT_SCALE);
+                btnTextColor(), SQUAD_MEMBER_TEXT_SCALE);
         }
     }
 
@@ -793,11 +1074,119 @@ public class UnifiedDeployScreen extends MutilScreen {
 
     private static void drawScaledString(GuiGraphics graphics, String text, int x, int y,
                                          int color, float scale) {
-        graphics.pose().pushPose();
-        graphics.pose().scale(scale, scale, 1.0f);
-        graphics.drawString(Minecraft.getInstance().font, Component.literal(text),
-            Math.round(x / scale), Math.round(y / scale), color, false);
-        graphics.pose().popPose();
+        UiPaint.textScaled(graphics, text, x, y, color, scale, false);
+    }
+
+    /**
+     * 班组栏内联「小队名称」输入框（需求 7）：无边框 + 淡灰底色，点击聚焦后可输入。
+     * 机制与该界面原有的名称输入框一致（AUI 树内自绘）：聚焦时 UnifiedDeployScreen.keyPressed
+     * 优先把按键喂给它并吞掉其它快捷键；字符输入仍由 charTyped 完成。
+     */
+    private class SquadInlineNameField extends GuiElement {
+        private static final int MAX_LENGTH = 18;
+        private static final float FIELD_TEXT_SCALE = 0.72f;
+
+        private final String hint;
+        private String value = "";
+        private boolean typing = false;
+
+        SquadInlineNameField(int x, int y, int width, int height, String hint) {
+            super(x, y, width, height);
+            this.hint = hint == null ? "" : hint;
+        }
+
+        String getValue() {
+            return value.trim();
+        }
+
+        /** 原始输入内容（不 trim），用于整块重建时无损恢复草稿。 */
+        String getRawValue() {
+            return value;
+        }
+
+        void setValue(String text) {
+            value = text == null ? "" : text;
+        }
+
+        boolean isTyping() {
+            return typing;
+        }
+
+        void setTyping(boolean active) {
+            typing = active;
+        }
+
+        @Override
+        public boolean onMouseClick(int mouseX, int mouseY, int button) {
+            if (button != 0 || !isVisible()) {
+                return false;
+            }
+            typing = hasFocus();
+            return typing;
+        }
+
+        @Override
+        public boolean onKeyPress(int keyCode, int scanCode, int modifiers) {
+            if (!typing) {
+                return false;
+            }
+            if (keyCode == GLFW.GLFW_KEY_ENTER || keyCode == GLFW.GLFW_KEY_KP_ENTER) {
+                createSquadInline();
+                return true;
+            }
+            if (keyCode == GLFW.GLFW_KEY_BACKSPACE && !value.isEmpty()) {
+                int cut = value.offsetByCodePoints(value.length(), -1);
+                value = value.substring(0, cut);
+                return true;
+            }
+            if (keyCode == GLFW.GLFW_KEY_DELETE) {
+                value = "";
+                return true;
+            }
+            return false;
+        }
+
+        @Override
+        public boolean onCharType(char codePoint, int modifiers) {
+            // 167 = '§'，与 SharedConstants.isAllowedChatCharacter 同规则
+            if (!typing || value.length() >= MAX_LENGTH
+                || codePoint < ' ' || codePoint == 127 || codePoint == 167) {
+                return false;
+            }
+            value += codePoint;
+            return true;
+        }
+
+        @Override
+        public void draw(GuiGraphics graphics, int x, int y, int width, int height,
+                         int mouseX, int mouseY, float partialTick) {
+            if (!isVisible()) {
+                return;
+            }
+            int bx = x + getX();
+            int by = y + getY();
+            // 半透明内凹底（压在世界/毛玻璃上）+ 聚焦时强调色描边
+            int radius = UiTheme.RADIUS_INNER;
+            UiPaint.glassPanel(graphics, bx, by, getWidth(), getHeight(),
+                typing ? UiTheme.CONTROL_HOVER : UiTheme.CONTROL_NORMAL);
+
+            String drawn = value.isEmpty() ? hint : value;
+            int color = value.isEmpty() ? squadInlineFieldDimColor() : squadInlineFieldTextColor();
+            int logicalWidth = Math.max(8, (int) ((getWidth() - 8) / FIELD_TEXT_SCALE));
+            String trimmed = Minecraft.getInstance().font.plainSubstrByWidth(drawn, logicalWidth);
+            int textHeight = Math.max(1,
+                Math.round(Minecraft.getInstance().font.lineHeight * FIELD_TEXT_SCALE));
+            drawScaledString(graphics, trimmed, bx + 4,
+                by + Math.max(1, (getHeight() - textHeight) / 2), color, FIELD_TEXT_SCALE);
+
+            if (typing && (System.currentTimeMillis() / 500) % 2 == 0) {
+                int textWidth = Math.round(
+                    Minecraft.getInstance().font.width(trimmed) * FIELD_TEXT_SCALE);
+                int cursorX = Math.min(bx + getWidth() - 3, bx + 4 + textWidth + 1);
+                graphics.fill(cursorX, by + 3, cursorX + 1,
+                    by + Math.max(4, getHeight() - 3), UiTheme.ACCENT);
+            }
+        }
     }
 
     // ==================== 自定义文本元素（绕过 GuiText，直接用 drawString) ====================
@@ -810,7 +1199,7 @@ public class UnifiedDeployScreen extends MutilScreen {
         PlainText(int x, int y, String text, int color) {
             super(x, y,
                 Math.max(1, Math.round(Minecraft.getInstance().font.width(
-                    EspetroMutilWidgets.stripFormatting(text)) * UI_TEXT_SCALE)),
+                    EspetroAuiWidgets.stripFormatting(text)) * UI_TEXT_SCALE)),
                 Math.max(1, Math.round(Minecraft.getInstance().font.lineHeight * UI_TEXT_SCALE)));
             this.text = text;
             this.color = color;
@@ -835,12 +1224,52 @@ public class UnifiedDeployScreen extends MutilScreen {
     // ==================== 界面构建 ====================
 
     @Override
-    protected void buildMutilRoot(GuiElement root) {
+        protected void init() {
+        // 部署面板一出现就关掉战术轮盘：否则轮盘会盖在面板上，
+        // 把面板上的点击当成轮盘确认（部署阶段"只能放炮"的根因之一）。
+        TacticalRadialController.closeWheelIfOpen();
+        // J 菜单打开时立刻关掉 V 键小地图，避免两块地图同时占屏
+        org.espetro.client.HcrTacticalMapBridge.hideMinimap();
+        // 毛玻璃底图要按这次打开时的画面重新截：换地图/换局后不复用旧快照。
+        FrostedBackdrop.invalidate();
+        super.init();
+    }
+
+    @Override
+    protected void buildMenuRoot(GuiElement root) {
         this.root = root;
         dirtySections.clear();
         populateGui();
+        if (themeViewState != null) {
+            ThemeViewState state = themeViewState;
+            themeViewState = null;
+            if (squadScrollList != null) squadScrollList.setOffset(state.squads());
+            if (classScrollList != null) classScrollList.setOffset(state.classes());
+            if (deployScrollList != null) deployScrollList.setOffset(state.deploys());
+            if (state.categoriesOpen()) openSquadCategoryPopup();
+            if (state.vehiclesOpen()) {
+                openVehicleInfoPopup();
+                if (vehicleInfoScrollList != null) vehicleInfoScrollList.setOffset(state.vehicles());
+            }
+            if (state.confirmation() != null) {
+                openSquadConfirm(state.confirmationTitle(), state.confirmationBody(), state.confirmation());
+            }
+        }
         // 打开包已携带服务端最新人数，后续变更也由服务端主动推送，
         // 不再打开界面后立即发起第二次请求。
+    }
+
+    @Override
+    protected void onThemeChanged() {
+        super.onThemeChanged();
+        themeViewState = new ThemeViewState(
+            squadScrollList == null ? 0 : squadScrollList.getOffset(),
+            classScrollList == null ? 0 : classScrollList.getOffset(),
+            deployScrollList == null ? 0 : deployScrollList.getOffset(),
+            hasSquadCategoryPopup(), hasVehicleInfoPopup(),
+            vehicleInfoScrollList == null ? 0 : vehicleInfoScrollList.getOffset(),
+            squadConfirmTitle, squadConfirmBody, hasSquadConfirm() ? squadConfirmAction : null);
+        FrostedBackdrop.invalidate();
     }
 
     private void populateGui() {
@@ -853,6 +1282,8 @@ public class UnifiedDeployScreen extends MutilScreen {
         this.phaseTitleText = null;
         this.governanceTimerText = null;
         this.governanceVoteButtons.clear();
+        this.vehicleInfoDropButton = null;
+        this.vehicleInfoScrollList = null;
         // Seed from global cache so mid-impeachment open still shows vote UI.
         this.governanceState = ClientGovernanceState.get();
         this.governanceReceivedAtMs = ClientGovernanceState.getReceivedAtMs();
@@ -861,23 +1292,34 @@ public class UnifiedDeployScreen extends MutilScreen {
         buildTitleBar();
 
         // 所有非地图区域使用同一层不透明纯黑底；地图视口由桥接渲染器逐帧绘制。
-        root.addChild(new GuiRect(leftX, leftY, leftW, leftH, PANEL_LEFT_BG));
-        root.addChild(new GuiRect(centerX, centerY, centerW, centerH, PANEL_CENTER_BG));
+        // 面板底色改由 renderBeforeMenu 动态绘制（部署后透明），这里不再放固定底色的 GuiRect
+        boolean combatColumnVisible = waitingForDeploySelection;
+        if (combatColumnVisible) {
+            // 同上：中列底色由 renderBeforeMenu 动态绘制
+        }
         root.addChild(new GuiRect(mapX, mapY + Math.max(0, mapH - MAP_FOOTER_H),
-            mapW, MAP_FOOTER_H, PANEL_MAP_FOOTER_BG));
+            mapW, MAP_FOOTER_H, panelMapFooterBgColor()));
 
         squadSectionRoot = new GuiElement(0, 0, this.width, this.height);
-        classSectionRoot = new GuiElement(0, 0, this.width, this.height);
-        deploySectionRoot = new GuiElement(0, 0, this.width, this.height);
         mapControlsRoot = new GuiElement(0, 0, this.width, this.height);
         statusSectionRoot = new GuiElement(0, 0, this.width, this.height);
 
         root.addChild(squadSectionRoot);
         buildSquadSection(squadSectionRoot);
-        root.addChild(classSectionRoot);
-        buildClassSection(classSectionRoot);
-        root.addChild(deploySectionRoot);
-        buildDeploySection(deploySectionRoot);
+        if (combatColumnVisible) {
+            // 等待部署：构建职业选择与部署点两节（区域宽度已在 computeRegions 中按 3/4 计算）。
+            classSectionRoot = new GuiElement(0, 0, this.width, this.height);
+            deploySectionRoot = new GuiElement(0, 0, this.width, this.height);
+            root.addChild(classSectionRoot);
+            buildClassSection(classSectionRoot);
+            root.addChild(deploySectionRoot);
+            buildDeploySection(deploySectionRoot);
+        } else {
+            // 已部署（战局中）：职业/部署点栏整体隐藏，树中不含这两节。
+            // 数据仍由各 update* 方法缓存，死亡重选时整树重建即可恢复。
+            classSectionRoot = null;
+            deploySectionRoot = null;
+        }
         root.addChild(mapControlsRoot);
         buildMapPanel(mapControlsRoot);
         root.addChild(statusSectionRoot);
@@ -885,6 +1327,19 @@ public class UnifiedDeployScreen extends MutilScreen {
         fireteamContextRoot = new GuiElement(0, 0, this.width, this.height);
         fireteamContextRoot.setVisible(false);
         root.addChild(fireteamContextRoot);
+        // 需求 3-3：载具信息上拉菜单层（与队伍类型上拉菜单同为最上层弹层）
+        vehicleInfoRoot = new GuiElement(0, 0, this.width, this.height);
+        vehicleInfoRoot.setVisible(false);
+        root.addChild(vehicleInfoRoot);
+        // 班组弹层：队伍类型上拉菜单 / 确认框（始终最后添加，保证在最上层拦截点击）
+        squadCategoryRoot = new GuiElement(0, 0, this.width, this.height);
+        squadCategoryRoot.setVisible(false);
+        squadConfirmRoot = new GuiElement(0, 0, this.width, this.height);
+        root.addChild(squadCategoryRoot);
+        root.addChild(squadConfirmRoot);
+        closeSquadCategoryPopup();
+        closeVehicleInfoPopup();
+        closeSquadConfirm();
     }
 
     private void invalidateSections(Section... sections) {
@@ -901,21 +1356,23 @@ public class UnifiedDeployScreen extends MutilScreen {
         }
         EnumSet<Section> pending = EnumSet.copyOf(dirtySections);
         dirtySections.clear();
-        if (pending.contains(Section.SQUAD)) {
-            rebuildSquadSection();
-        }
-        if (pending.contains(Section.CLASS)) {
-            rebuildClassSection();
-        }
-        if (pending.contains(Section.DEPLOY)) {
-            rebuildDeploySection();
-        }
-        if (pending.contains(Section.MAP_CONTROLS)) {
-            rebuildMapControls();
-        }
-        if (pending.contains(Section.STATUS)) {
-            rebuildStatusSection();
-        }
+        org.espetro.client.aui.AuiScreen.runWithDocument(null, () -> {
+            if (pending.contains(Section.SQUAD)) {
+                rebuildSquadSection();
+            }
+            if (pending.contains(Section.CLASS)) {
+                rebuildClassSection();
+            }
+            if (pending.contains(Section.DEPLOY)) {
+                rebuildDeploySection();
+            }
+            if (pending.contains(Section.MAP_CONTROLS)) {
+                rebuildMapControls();
+            }
+            if (pending.contains(Section.STATUS)) {
+                rebuildStatusSection();
+            }
+        });
     }
 
     private void rebuildSquadSection() {
@@ -990,7 +1447,12 @@ public class UnifiedDeployScreen extends MutilScreen {
 
         centerX = leftX + leftW + 4;
         centerY = leftY;
-        centerW = Math.max(132, Math.min(260, (int) (this.width * 0.31f)));
+        // 职业选择 + 部署点栏：仅等待部署（含死亡重选部署点）时可见，宽度收窄为原
+        // 布局的 3/4，把空间让给右侧地图；玩家已部署进入战局后该栏隐藏
+        // （centerW=0），地图自动向左扩展占满剩余宽度。死亡后服务端把
+        // waiting 置回 true 并重推部署面板，本栏随之重新显示。
+        int centerFullW = Math.max(132, Math.min(260, (int) (this.width * 0.31f)));
+        centerW = waitingForDeploySelection ? centerFullW * 3 / 4 : 0;
         centerH = usableH;
 
         mapX = centerX + centerW + 4;
@@ -1017,31 +1479,31 @@ public class UnifiedDeployScreen extends MutilScreen {
 
     // ---------- 标题行 ----------
     private void buildTitleBar() {
-        String teamColor = "ATTACK".equals(team) ? "\u00a7c" : "\u00a79";
+        String teamColor = EspetroAuiWidgets.teamPrefix(team);
         // Phase text — update dynamically by refreshTitleTimer()
         phaseTitleText = new PlainText(5, 3,
-            "\u00a76\u00a7l部署阶段 \u00a77| " + teamColor + "\u00a7l"
+            "部署阶段 \u00a77| " + teamColor + "\u00a7l"
                 + factionIcon + " " + factionName,
-            0xFFFFFF);
+            UiTheme.TEXT);
         root.addChild(phaseTitleText);
 
-        String teamName = "ATTACK".equals(team) ? "进攻方" : "防守方";
+        String teamName = EspetroAuiWidgets.teamName(team);
         String sub = "\u00a7f" + teamName;
         if (factionDescription != null && !factionDescription.isEmpty())
             sub += " \u00a7f· " + factionDescription;
         PlainText subtitle = new PlainText(5, 15,
-            EspetroMutilWidgets.trimToWidth(sub, Math.max(80, this.width - 16)), BTN_TEXT);
+            EspetroAuiWidgets.trimToWidth(sub, Math.max(80, this.width - 16)), btnTextColor());
         root.addChild(subtitle);
 
         PlainText hint = new PlainText(5, 25,
-            EspetroMutilWidgets.trimToWidth(
+            EspetroAuiWidgets.trimToWidth(
                 "\u00a77选择班组、职业与部署点，确认后等待部署",
-                Math.max(80, this.width - 16)), BTN_TEXT);
+                Math.max(80, this.width - 16)), btnTextColor());
         root.addChild(hint);
 
-        statusTimerText = new PlainText(this.width - 6, 4, "", 0xFFFFD27A);
+        statusTimerText = new PlainText(this.width - 6, 4, "", UiTheme.GOLD);
         root.addChild(statusTimerText);
-        troopCountText = new PlainText(this.width - 6, 16, "", 0xFFFFFFFF);
+        troopCountText = new PlainText(this.width - 16, 16, "", UiTheme.TEXT);
         root.addChild(troopCountText);
         refreshTitleTimer();
         updateTroopLabel(TroopCountOverlay.getDisplayLine());
@@ -1064,7 +1526,7 @@ public class UnifiedDeployScreen extends MutilScreen {
     }
 
     private int teamAccentColor() {
-        return "ATTACK".equals(team) ? 0xFFD35B50 : 0xFF5685C7;
+        return "ATTACK".equals(team) ? UiTheme.ATTACK : UiTheme.DEFEND;
     }
 
     // ---------- 班组（左列） ----------
@@ -1074,15 +1536,25 @@ public class UnifiedDeployScreen extends MutilScreen {
         int areaW = squadAreaW;
         int areaH = squadAreaH;
 
-        sectionRoot.addChild(new PlainText(sx, sy, "\u00a76\u00a7l班组", 0xFFFFC766));
-        int manageH = SQUAD_ROW_H;
+        sectionRoot.addChild(new PlainText(sx, sy, "班组", UiTheme.GOLD));
+        // 底部动作行：改版后固定 1 行（需求 7/9）
+        // 未入队：[创建小队(1/5 宽·1 倍行高·绿底)] [黄色队伍类型上拉] [名称输入框(等高)]
+        // 已入队：[退出小队(同位置同尺寸)]，队长时右侧追加 [解散] [锁定/解锁]（黑半透底）
+        int actionsH = squadActionHeight();
         int listY = sy + SECTION_TITLE_H + 1;
-        int listH = areaH - SECTION_TITLE_H - manageH - 5;
+        int listH = areaH - SECTION_TITLE_H - actionsH - 5;
 
         squadScrollList = new ScrollableList(sx, listY, areaW, Math.max(SQUAD_ROW_H, listH))
-            .setScrollStep(SQUAD_ROW_H + SQUAD_ROW_GAP)
+            .setScrollStep(SQUAD_TITLE_ROW_H + SQUAD_ROW_GAP)
             .setAlwaysShowScrollbar(false);
         sectionRoot.addChild(squadScrollList);
+
+        squadActionRoot = new GuiElement(0, 0, this.width, this.height);
+        sectionRoot.addChild(squadActionRoot);
+        squadActionX = sx;
+        squadActionY = sy + areaH - actionsH;
+        squadActionW = areaW;
+        rebuildSquadActions();
 
         int rowW = areaW - 6;
         int rowY = 0;
@@ -1090,14 +1562,18 @@ public class UnifiedDeployScreen extends MutilScreen {
             boolean mine = squad.id == mySquadId;
             boolean unavailable = squad.isLocked || squad.memberCount >= squad.maxMembers;
             boolean expanded = expandedSquadIds.contains(squad.id);
+            // 未入队时，每个班组标题行右端提供"加入"按钮（锁定/满员灰显并提示原因）
+            boolean showJoin = !inSquad();
+            int titleW = showJoin ? Math.max(40, rowW - SQUAD_JOIN_BTN_W - 2) : rowW;
             String disclosure = expanded ? "\u00a7f\u25bc" : "\u00a7f\u25b6";
             String state = mine ? "\u00a7a\u25cf" : squad.isLocked ? "\u00a7c\u25a0" : "\u00a77\u25cb";
             String label = disclosure + " " + state + " \u00a7f" + squad.displayId + ". " + squad.name
                 + " \u00a77" + squad.memberCount + "/" + squad.maxMembers;
-            EspButton button = new EspButton(0, rowY, rowW, SQUAD_ROW_H,
+            EspButton button = new EspButton(0, rowY, titleW, SQUAD_TITLE_ROW_H,
                 label, () -> toggleSquadExpanded(squad.id));
             button.setTextScale(SQUAD_TEXT_SCALE);
             button.setCenteredText(false);
+            button.setPlainBlack();   // 需求 6：原"有边框、没底色" → 无边框 + 黑半透底
             // \u884c\u6700\u53f3\u4fa7\u663e\u793a\u5fd7\u613f/\u73ed\u7ec4\u7c7b\u522b\uff08\u521b\u5efa\u65f6\u9009\u62e9\u7684 category\uff09\u3002
             String category = squad.categoryDisplayName;
             if (category != null && !category.isBlank()
@@ -1106,11 +1582,30 @@ public class UnifiedDeployScreen extends MutilScreen {
                 button.setRightLabel("\u00a7e" + category);
             }
             if (mine) {
-                button.normalColor = 0xFF344939;
-                button.hoverColor = 0xFF3C5542;
+                button.normalColor = UiTheme.POSITIVE_SOFT;
+                button.hoverColor = UiTheme.withAlpha(UiTheme.POSITIVE, 0x24);
             }
             squadScrollList.addChild(button);
-            rowY += SQUAD_ROW_H + SQUAD_ROW_GAP;
+            if (showJoin) {
+                // 后添加 → 优先响应点击，避免与标题按钮抢事件
+                EspButton join = new EspButton(rowW - SQUAD_JOIN_BTN_W, rowY,
+                    SQUAD_JOIN_BTN_W, SQUAD_TITLE_ROW_H, "\u00a7a加入",
+                    () -> NetworkManager.joinSquad(squad.id));
+                join.setTextScale(SQUAD_TEXT_SCALE);
+                join.setPlainBlack();   // 需求 6：默认黑半透底（禁用态也保留一点底），可加入时下面覆盖为绿底
+                join.setEnabled(!unavailable);
+                if (unavailable) {
+                    String reason = squad.isLocked
+                        ? "该班组已锁定，无法加入。"
+                        : "该班组人数已满。";
+                    join.setDisabledAction(() -> EspetroTipNotifier.showDenial("无法加入班组", reason));
+                } else {
+                    join.normalColor = UiTheme.POSITIVE_SOFT;
+                    join.hoverColor = UiTheme.withAlpha(UiTheme.POSITIVE, 0x24);
+                }
+                squadScrollList.addChild(join);
+            }
+            rowY += SQUAD_TITLE_ROW_H + SQUAD_ROW_GAP;
 
             if (!expanded) {
                 continue;
@@ -1119,7 +1614,7 @@ public class UnifiedDeployScreen extends MutilScreen {
             if (squad.members.isEmpty()) {
                 squadScrollList.addChild(new SquadMemberRow(
                     3, rowY, rowW - 3, "\u00a77暂无成员资料",
-                    0xFF59605E, 0xFF59605E, null, squad.id));
+                    UiTheme.TEXT_DISABLED, UiTheme.TEXT_DISABLED, null, squad.id));
                 rowY += SQUAD_MEMBER_ROW_H + SQUAD_ROW_GAP;
             } else {
                 // 服务端已按 A→B→C 排序；同组聚集后插组标题（事件重建，非 tick）
@@ -1144,8 +1639,8 @@ public class UnifiedDeployScreen extends MutilScreen {
                         ? ""
                         : " \u00a78| \u00a7b" + member.className;
                     int roleAccent = member.commander
-                        ? 0xFFFFC766
-                        : member.leader ? 0xFFD48CFF : 0xFF67A7FF;
+                        ? UiTheme.GOLD
+                        : member.leader ? UiTheme.PURPLE : UiTheme.SQUAD;
                     Fireteam ft = Fireteam.fromIndex(member.fireteam);
                     squadScrollList.addChild(new SquadMemberRow(
                         3, rowY, rowW - 3,
@@ -1154,25 +1649,182 @@ public class UnifiedDeployScreen extends MutilScreen {
                     rowY += SQUAD_MEMBER_ROW_H + SQUAD_ROW_GAP;
                 }
             }
-
-            if (!mine && !unavailable) {
-                EspButton join = new EspButton(3, rowY, rowW - 3, SQUAD_ACTION_ROW_H,
-                    "\u00a7a+ 加入班组", () -> NetworkManager.joinSquad(squad.id));
-                join.setTextScale(SQUAD_MEMBER_TEXT_SCALE);
-                join.normalColor = 0xFF25352B;
-                join.hoverColor = 0xFF3C5542;
-                squadScrollList.addChild(join);
-                rowY += SQUAD_ACTION_ROW_H + SQUAD_ROW_GAP;
-            }
         }
         if (squads.isEmpty()) {
-            squadScrollList.addChild(new PlainText(2, 3, "\u00a77暂无班组", 0xFFABB0B3));
+            squadScrollList.addChild(new PlainText(2, 3, "\u00a77暂无班组", UiTheme.TEXT_THIRD));
         }
+    }
 
-        EspButton manage = new EspButton(sx, sy + areaH - manageH, areaW, manageH,
-            "\u00a7e管理班组", this::openSquadManagement);
-        manage.setTextScale(SQUAD_TEXT_SCALE);
-        sectionRoot.addChild(manage);
+    /** 底部动作行高度：等于动作按钮高度 = 1 倍行高（本轮需求 2：由 2 倍行高减半）。 */
+    private int squadActionHeight() {
+        return SQUAD_ROW_H * SQUAD_CREATE_BTN_H_MUL;
+    }
+
+    /** 「创建/退出」按钮宽度：动作区宽度的 1/5（需求 7/9）。 */
+    private int squadCreateButtonWidth() {
+        return Math.max(24, squadActionW / SQUAD_CREATE_BTN_W_DIV);
+    }
+
+    /**
+     * 需求 3-2：「创建/退出小队」与「队伍类型」上拉按钮共用同一字号。
+     *
+     * <p>「创建小队」按 4 个汉字估宽（1.0 倍约 36px）；「▲ + 当前类型名」按
+     * 箭头 9px + 空格 4px + 每字 9px 估宽。取两者都放得下的较小值，
+     * 再夹到 {@link #SQUAD_ACTION_TEXT_SCALE_MIN}~{@link #SQUAD_ACTION_TEXT_SCALE_MAX}
+     * 区间内，保证两个按钮字号一致且文案完整。</p>
+     */
+    private float squadActionTextScale(int createW, int dropdownW) {
+        float createFit = Math.max(0.01f, (createW - 6) / 36.0f);
+        String name = EspetroAuiWidgets.stripFormatting(currentSquadCategoryName());
+        float labelSpan = 13.0f + Math.max(0, name.length()) * 9.0f;
+        float dropFit = Math.max(0.01f, (dropdownW - 6) / labelSpan);
+        float fit = Math.min(createFit, dropFit);
+        float lower = Math.min(SQUAD_ACTION_TEXT_SCALE_MIN, fit);
+        return Math.max(lower, Math.min(SQUAD_ACTION_TEXT_SCALE_MAX, fit));
+    }
+
+    /**
+     * 重建底部动作行（单行，需求 7/9 + 本轮需求 1~4）。
+     * 未入队：[创建小队(1/5 宽·1 倍行高·绿底)] [黄色队伍类型上拉按钮] [名称输入框(等高)]；
+     * 已入队：[退出小队(与创建小队同位置同尺寸·红底)]；队长时右侧再排 [解散] [锁定]（黑半透底）。
+     * 解散与锁定只对队长可见，对非队长/未入队完全隐藏。
+     */
+    private void rebuildSquadActions() {
+        if (squadActionRoot == null) {
+            return;
+        }
+        // 整块重建前保留输入框草稿与焦点，避免数据刷新丢掉玩家已输入的名称
+        if (squadInlineNameField != null) {
+            squadInlineName = squadInlineNameField.getRawValue();
+            squadInlineNameTyping = squadInlineNameField.isTyping();
+        }
+        closeSquadCategoryPopup();
+        squadActionRoot.clearChildren();
+        squadInlineNameField = null;
+        squadCategoryDropButton = null;
+        squadDisbandButton = null;
+        squadLockButton = null;
+        squadCreateLeaveButton = null;
+
+        boolean inSquadNow = inSquad();
+        boolean leader = inSquadNow && isLocalPlayerLeader();
+        boolean locked = isMySquadLocked();
+        if (inSquadNow) {
+            // 已入队：内联创建控件不显示，顺手清掉输入草稿与焦点
+            squadInlineName = "";
+            squadInlineNameTyping = false;
+        }
+        int rowH = squadActionHeight();
+        int createW = squadCreateButtonWidth();
+        int gap = SQUAD_INLINE_GAP;
+        int y = squadActionY;
+        // 需求 3-2：「创建/退出小队」与「队伍类型」上拉按钮统一字号：
+        // 先按同一套宽度算出两个按钮都放得下的共享字号，再分别 setTextScale(同一个值)。
+        int actionRightW = Math.max(0, squadActionW - createW - gap);
+        int actionDropW = Math.max(18, Math.min(34, actionRightW / 2));
+        float actionTextScale = squadActionTextScale(createW, actionDropW);
+
+        // 「创建小队」/「退出小队」：永远在最左，共用同一位置与尺寸（1/5 宽 · 1 倍行高 · 无边框）
+        squadCreateLeaveButton = new EspButton(squadActionX, y, createW, rowH,
+            inSquadNow ? "\u00a7c退出小队" : "\u00a7a创建小队",
+            inSquadNow ? this::openLeaveSquadConfirm : this::createSquadInline);
+        squadCreateLeaveButton.setTextScale(actionTextScale);   // 需求 3-2：与队伍类型按钮同一个字号
+        // 需求 6：原本就有底色（绿/红）→ 只去掉边框，底色保留
+        squadCreateLeaveButton.normalColor = inSquadNow ? squadLeaveBgColor() : squadCreateBgColor();
+        squadCreateLeaveButton.hoverColor = inSquadNow ? squadLeaveBgHoverColor() : squadCreateBgHoverColor();
+        squadActionRoot.addChild(squadCreateLeaveButton);
+
+        int rightX = squadActionX + createW + gap;
+        int rightW = Math.max(0, squadActionW - createW - gap);
+
+        if (!inSquadNow) {
+            if (!squadCategoryIdValid()) {
+                squadCreateCategoryId = defaultSquadCategoryId();
+            }
+            // 需求 1：动作行顺序改为 [创建小队] → [队伍类型下拉] → [队名输入框]
+            // 需求 2/3：三者等高（rowH，本轮已降为原先的一半）
+            int ddW = actionDropW;   // 需求 3-2：与上面统一字号使用同一个宽度
+            int inputX = rightX + ddW + gap;
+            int inputW = Math.max(20, rightW - ddW - gap);
+
+            // 队伍类型按钮插在创建按钮与队名输入框之间；原本就有底色 → 只去掉边框
+            squadCategoryButtonX = rightX;
+            squadCategoryButtonY = y;
+            squadCategoryButtonW = ddW;
+            squadCategoryButtonH = rowH;
+            squadCategoryDropButton = new EspButton(rightX, y, ddW, rowH,
+                squadCategoryDropLabel(), this::toggleSquadCategoryPopup);
+            squadCategoryDropButton.setTextScale(actionTextScale);   // 需求 3-2：与创建小队同一个字号
+            squadCategoryDropButton.normalColor = squadCategoryBgColor();          // 黄色
+            squadCategoryDropButton.hoverColor = squadCategoryBgHoverColor();
+            squadActionRoot.addChild(squadCategoryDropButton);
+
+            // 队名输入框：与按钮等高（需求 3），无边框 + 淡灰底
+            squadInlineNameField = new SquadInlineNameField(
+                inputX, y, inputW, rowH, "小队名称");
+            squadInlineNameField.setValue(squadInlineName);
+            squadInlineNameField.setTyping(squadInlineNameTyping);
+            squadActionRoot.addChild(squadInlineNameField);
+        } else if (leader) {
+            // 解散 / 锁定（缩小 + 只显示「解散」「锁定」两词，需求 9）：排在「退出」右侧
+            int disbandW = Math.max(28, (rightW - gap) / 2);
+            squadDisbandButton = new EspButton(rightX, y, disbandW, rowH,
+                "\u00a7c解散", this::openDisbandSquadConfirm);
+            squadDisbandButton.setTextScale(SQUAD_TEXT_SCALE);
+            squadDisbandButton.setPlainBlack();   // 需求 4/6：无边框 + 黑色半透明底
+            squadActionRoot.addChild(squadDisbandButton);
+
+            int lockX = rightX + disbandW + gap;
+            int lockW = Math.max(24, squadActionX + squadActionW - lockX);
+            squadLockButton = new EspButton(lockX, y, lockW, rowH,
+                locked ? "\u00a7e解锁" : "\u00a7e锁定",
+                () -> {
+                    if (isMySquadLocked()) {
+                        NetworkManager.unlockSquad();
+                    } else {
+                        NetworkManager.lockSquad();
+                    }
+                });
+            squadLockButton.setTextScale(SQUAD_TEXT_SCALE);
+            squadLockButton.setPlainBlack();   // 需求 4/6：无边框 + 黑色半透明底
+            squadActionRoot.addChild(squadLockButton);
+        }
+    }
+
+    /** 本地玩家是否是自己小队的队长（成员列表 leader 标记 + 本地 UUID）。 */
+    private boolean isLocalPlayerLeader() {
+        if (!inSquad()) {
+            return false;
+        }
+        var player = Minecraft.getInstance().player;
+        if (player == null) {
+            return false;
+        }
+        UUID localId = player.getUUID();
+        for (UnifiedDeployScreenPacket.SquadInfo squad : squads) {
+            if (squad.id != mySquadId) {
+                continue;
+            }
+            for (UnifiedDeployScreenPacket.SquadMemberInfo member : squad.members) {
+                if (localId.equals(member.uuid)) {
+                    return member.leader;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** 本地玩家所在小队是否已锁定。 */
+    private boolean isMySquadLocked() {
+        if (!inSquad()) {
+            return false;
+        }
+        for (UnifiedDeployScreenPacket.SquadInfo squad : squads) {
+            if (squad.id == mySquadId) {
+                return squad.isLocked;
+            }
+        }
+        return false;
     }
 
     private void toggleSquadExpanded(int squadId) {
@@ -1182,32 +1834,523 @@ public class UnifiedDeployScreen extends MutilScreen {
         invalidateSections(Section.SQUAD);
     }
 
-    private void openSquadManagement() {
-        try {
-            Minecraft.getInstance().setScreen(
-                new SquadScreen(new ArrayList<>(squads), mySquadId, team,
-                    new ArrayList<>(squadCategories), this));
-        } catch (Throwable t) {
-            // 避免班组界面类加载失败时拖垮整局客户端。
-            org.espetro.Espetro.LOGGER.error("打开班组管理界面失败", t);
-            var player = Minecraft.getInstance().player;
-            if (player != null) {
-                player.displayClientMessage(
-                    Component.literal("§c无法打开班组管理界面，请查看日志。"), false);
+    /**
+     * 内联创建小队（需求 7）：用输入框里的名称 + 上拉菜单选中的队伍类型发包，
+     * 不再打开屏幕正中的「创建小队」小窗。发包逻辑与原来的创建小窗完全一致。
+     */
+    private void createSquadInline() {
+        if (inSquad()) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (now - squadCreateSentAtMs < 1200L) {
+            return;   // 防连点重复创建
+        }
+        String name = squadInlineNameField == null
+            ? squadInlineName
+            : squadInlineNameField.getValue();
+        squadInlineName = name == null ? "" : name;
+        String categoryId = squadCreateCategoryId == null ? "none" : squadCreateCategoryId;
+        squadCreateSentAtMs = now;
+        squadInlineNameTyping = false;   // 发完包收起输入焦点（与旧小窗确定后关闭一致）
+        if (squadInlineNameField != null) {
+            squadInlineNameField.setTyping(false);
+        }
+        NetworkManager.sendSquadCreateWithCategory(squadInlineName, categoryId);
+    }
+
+    /** 队伍类型上拉菜单是否打开。 */
+    private boolean hasSquadCategoryPopup() {
+        return squadCategoryRoot != null && squadCategoryRoot.isVisible();
+    }
+
+    private void closeSquadCategoryPopup() {
+        if (squadCategoryRoot != null) {
+            squadCategoryRoot.clearChildren();
+            squadCategoryRoot.setVisible(false);
+        }
+    }
+
+    /** 黄色按钮：开/关队伍类型上拉菜单。 */
+    private void toggleSquadCategoryPopup() {
+        if (hasSquadCategoryPopup()) {
+            closeSquadCategoryPopup();
+            return;
+        }
+        openSquadCategoryPopup();
+    }
+
+    /** 打开队伍类型上拉菜单：贴在黄色按钮上方，选项取 squadCategoryOptions()。 */
+    private void openSquadCategoryPopup() {
+        if (squadCategoryRoot == null) {
+            return;
+        }
+        closeSquadCategoryPopup();
+        List<UnifiedDeployScreenPacket.SquadCategoryInfo> options = squadCategoryOptions();
+        int rowH2 = BTN_H + 2;
+        int w = Math.max(64, Math.min(150, squadActionW));
+        int h = 4 + options.size() * rowH2;
+        int px = Math.max(2, Math.min(this.width - w - 2,
+            squadCategoryButtonX + squadCategoryButtonW - w));
+        int py = Math.max(2, squadCategoryButtonY - h - 2);   // 上拉：贴在按钮上方
+        squadCategoryRoot.clearChildren();
+        squadCategoryRoot.setVisible(true);
+        // 全屏遮罩：点菜单外 = 关闭（反序遍历，后添加的选项按钮优先响应）
+        squadCategoryRoot.addChild(new GuiElement(0, 0, this.width, this.height) {
+            @Override
+            public boolean onMouseClick(int mx, int my, int button) {
+                closeSquadCategoryPopup();
+                return true;
+            }
+        });
+        squadCategoryRoot.addChild(EspetroAuiWidgets.panel(px, py, w, h, UiTheme.GLASS_PANEL, UiTheme.HAIRLINE_STRONG));
+        int y = py + 2;
+        for (var option : options) {
+            final String categoryId = option.id;
+            EspButton btn = new EspButton(px + 2, y, w - 4, rowH2 - 1,
+                categoryLabel(option), () -> selectSquadCreateCategory(categoryId));
+            btn.setTextScale(UI_TEXT_SCALE);
+            btn.setCenteredText(false);
+            btn.setPlainBlack();   // 需求 6：原"有边框、没底色" → 无边框 + 黑半透底
+            squadCategoryRoot.addChild(btn);
+            y += rowH2;
+        }
+    }
+
+    /** 切换队伍类型：更新 squadCreateCategoryId、刷新黄色按钮文案，保留输入框名称。 */
+    private void selectSquadCreateCategory(String categoryId) {
+        if (categoryId == null) {
+            return;
+        }
+        squadCreateCategoryId = categoryId;
+        refreshSquadCategoryDropButton();
+        closeSquadCategoryPopup();
+    }
+
+    /** 黄色上拉按钮文案：当前选中的队伍类型（黑字 + 上三角）。 */
+    private String squadCategoryDropLabel() {
+        return "\u25b2 " + currentSquadCategoryName();
+    }
+
+    private String currentSquadCategoryName() {
+        for (UnifiedDeployScreenPacket.SquadCategoryInfo option : squadCategoryOptions()) {
+            if (option.id != null && option.id.equals(squadCreateCategoryId)) {
+                return option.displayName == null ? "" : option.displayName;
             }
         }
+        return "";
+    }
+
+    /** 当前选中的队伍类型是否仍在可选列表里。 */
+    private boolean squadCategoryIdValid() {
+        for (UnifiedDeployScreenPacket.SquadCategoryInfo option : squadCategoryOptions()) {
+            if (option.id != null && option.id.equals(squadCreateCategoryId)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void refreshSquadCategoryDropButton() {
+        if (squadCategoryDropButton != null) {
+            squadCategoryDropButton.setLabel(squadCategoryDropLabel());
+        }
+    }
+
+    /** 队伍类型选项：地图 squadCategories（含"无"兜底）。 */
+    private List<UnifiedDeployScreenPacket.SquadCategoryInfo> squadCategoryOptions() {
+        if (squadCategories == null || squadCategories.isEmpty()) {
+            return List.of(new UnifiedDeployScreenPacket.SquadCategoryInfo("none", "无"));
+        }
+        return squadCategories;
+    }
+
+    private String defaultSquadCategoryId() {
+        List<UnifiedDeployScreenPacket.SquadCategoryInfo> options = squadCategoryOptions();
+        return options.get(0).id;
+    }
+
+    private String categoryLabel(UnifiedDeployScreenPacket.SquadCategoryInfo option) {
+        boolean selected = option.id.equals(squadCreateCategoryId);
+        return (selected ? "\u00a7a\u25b6 " : "\u00a7f   ") + option.displayName;
+    }
+
+    // ===== 载具信息上拉菜单（需求 3-3：取代原独立载具信息窗口）=====
+
+    /** 载具信息上拉菜单是否打开。 */
+    private boolean hasVehicleInfoPopup() {
+        return vehicleInfoRoot != null && vehicleInfoRoot.isVisible();
+    }
+
+    private void closeVehicleInfoPopup() {
+        if (vehicleInfoRoot != null) {
+            vehicleInfoRoot.clearChildren();
+            vehicleInfoRoot.setVisible(false);
+        }
+        vehicleInfoScrollList = null;
+        vehicleInfoRowButtons.clear();
+        vehicleInfoRowVehicles.clear();
+    }
+
+    /** 页脚「载具」按钮：开/关载具信息上拉菜单。 */
+    private void toggleVehicleInfoPopup() {
+        if (hasVehicleInfoPopup()) {
+            closeVehicleInfoPopup();
+            return;
+        }
+        openVehicleInfoPopup();
+    }
+
+    /**
+     * 打开载具信息上拉菜单：排版与「队伍类型」上拉菜单一致 ——
+     * 一个按钮 + 按钮上方弹出选项列表 + 全屏半透明遮罩（点菜单外关闭）；
+     * 选项超过 {@link #VEHICLE_POPUP_MAX_ROWS} 行时列表可滚动（带滚动条）。
+     */
+    private void openVehicleInfoPopup() {
+        if (vehicleInfoRoot == null) {
+            return;
+        }
+        closeSquadCategoryPopup();   // 两个上拉菜单互斥
+        renderVehicleInfoPopup(false);
+    }
+
+    /**
+     * bug 修复：弹层已打开时就地重建内容 —— 不改变“是否打开”的状态，
+     * 滚动偏移按需保留，hover 由每帧 focus 计算自动恢复。
+     * 用于地图控制区重建（技能冷却每秒触发）与载具行集合变化。
+     */
+    private void refreshVehicleInfoPopupLayout(boolean preserveScroll) {
+        if (vehicleInfoRoot == null || !hasVehicleInfoPopup()) {
+            return;
+        }
+        renderVehicleInfoPopup(preserveScroll);
+    }
+
+    /** 只重建弹层子节点与行按钮，不负责打开/关闭（可见性由调用方语义决定）。 */
+    private void renderVehicleInfoPopup(boolean preserveScroll) {
+        if (vehicleInfoRoot == null) {
+            return;
+        }
+        double keepOffset = preserveScroll && vehicleInfoScrollList != null
+            ? vehicleInfoScrollList.getOffset() : 0.0D;
+        vehicleInfoRoot.clearChildren();
+        vehicleInfoScrollList = null;
+        vehicleInfoRowButtons.clear();
+        vehicleInfoRowVehicles.clear();
+        int rowH = VEHICLE_POPUP_ROW_H;
+        int count = vehicleInfos.size();
+        int visibleRows = Math.min(Math.max(1, count), VEHICLE_POPUP_MAX_ROWS);
+        boolean scrollable = count > VEHICLE_POPUP_MAX_ROWS;
+        int w = Math.max(96, Math.min(VEHICLE_POPUP_W, this.width - 8));
+        int listH = visibleRows * rowH;
+        int h = listH + 4;
+        int px = Math.max(2, Math.min(this.width - w - 2,
+            vehicleInfoButtonX + vehicleInfoButtonW - w));
+        int py = vehicleInfoButtonY - h - 2;   // 上拉：贴在按钮上方
+        if (py < 2) {
+            // 上方放不下（按钮太靠上）时退化为下拉，保证菜单完整可见
+            py = Math.min(this.height - h - 2, vehicleInfoButtonY + vehicleInfoButtonH + 2);
+        }
+        py = Math.max(2, py);
+
+        vehicleInfoRoot.setVisible(true);
+        // 全屏遮罩：点菜单外 = 关闭（后添加的列表优先响应点击）
+        vehicleInfoRoot.addChild(new GuiElement(0, 0, this.width, this.height) {
+            @Override
+            public boolean onMouseClick(int mx, int my, int button) {
+                closeVehicleInfoPopup();
+                return true;
+            }
+        });
+        vehicleInfoRoot.addChild(EspetroAuiWidgets.panel(px, py, w, h, UiTheme.GLASS_PANEL, UiTheme.HAIRLINE_STRONG));
+
+        vehicleInfoScrollList = new ScrollableList(px + 2, py + 2, w - 4, listH)
+            .setScrollStep(rowH)
+            .setAlwaysShowScrollbar(scrollable);
+        vehicleInfoRoot.addChild(vehicleInfoScrollList);
+
+        if (vehicleInfos.isEmpty()) {
+            EspButton empty = new EspButton(2, 0, w - 6, rowH - 1,
+                "\u00a77当前编制暂无载具信息", null);
+            empty.setTextScale(UI_TEXT_SCALE);
+            empty.setCenteredText(false);
+            empty.setPlainBlack();
+            empty.setEnabled(false);
+            vehicleInfoScrollList.addChild(empty);
+            return;
+        }
+        int rowW = w - 6 - (scrollable ? 6 : 0);   // 滚动时给滚动条留位
+        int y = 0;
+        for (UnifiedDeployScreenPacket.VehicleInfo vehicle : vehicleInfos) {
+            EspButton row = new EspButton(2, y, rowW, rowH - 1,
+                vehicleInfoRowLabel(vehicle), null);
+            row.setTextScale(UI_TEXT_SCALE);
+            row.setCenteredText(false);
+            row.setPlainBlack();
+            // 就绪（未满、无冷却）的行加一层淡金高亮，对应菜单的"选中/可用项高亮"
+            row.setSelected(vehicleReady(vehicle), vehicleRowReadyTintColor());
+            vehicleInfoScrollList.addChild(row);
+            vehicleInfoRowButtons.add(row);
+            vehicleInfoRowVehicles.add(vehicle);
+            y += rowH;
+        }
+        vehicleInfoRoot.setVisible(true);
+        if (preserveScroll && vehicleInfoScrollList != null) {
+            vehicleInfoScrollList.setOffset(keepOffset);   // bug 修复：重建后恢复滚动位置
+        }
+    }
+
+    /**
+     * 每秒刷新：按钮文案 + 菜单内冷却倒计时/就绪数/可用高亮。
+     * bug 修复：这里只原地改 label 与 selected，绝不重建节点、绝不 close→reopen，
+     * 因此弹层会一直保持打开，滚动位置与 hover 都不受影响。
+     */
+    private void refreshVehicleInfoPopup() {
+        if (vehicleInfoDropButton != null) {
+            vehicleInfoDropButton.setLabel(vehicleInfoDropLabel());
+        }
+        if (!hasVehicleInfoPopup()) {
+            return;
+        }
+        for (int i = 0; i < vehicleInfoRowButtons.size(); i++) {
+            UnifiedDeployScreenPacket.VehicleInfo vehicle = vehicleInfoRowVehicles.get(i);
+            vehicleInfoRowButtons.get(i).setLabel(vehicleInfoRowLabel(vehicle));
+            vehicleInfoRowButtons.get(i).setSelected(
+                vehicleReady(vehicle), vehicleRowReadyTintColor());
+        }
+    }
+
+    /** 按钮文案：无数据时「载具信息 ▲」，有数据时「载具 就绪数/总数 ▲」。 */
+    private String vehicleInfoDropLabel() {
+        if (vehicleInfos.isEmpty()) {
+            return "\u00a7b载具信息 \u00a77\u25b2";
+        }
+        int ready = 0;
+        for (UnifiedDeployScreenPacket.VehicleInfo vehicle : vehicleInfos) {
+            if (vehicleReady(vehicle)) {
+                ready++;
+            }
+        }
+        return "\u00a7b载具 \u00a7f" + ready + "\u00a77/\u00a7f" + vehicleInfos.size()
+            + " \u00a77\u25b2";
+    }
+
+    /** 载具是否可用：不在冷却中且未达编制上限。 */
+    private boolean vehicleReady(UnifiedDeployScreenPacket.VehicleInfo vehicle) {
+        return vehicleCooldownSeconds(vehicle) <= 0 && vehicle.current < vehicle.max;
+    }
+
+    /** 冷却剩余秒数（包内 cooldownRemaining 为秒；用快照时刻在本地继续倒数）。 */
+    private int vehicleCooldownSeconds(UnifiedDeployScreenPacket.VehicleInfo vehicle) {
+        int base = Math.max(0, vehicle.cooldownRemaining);
+        if (base <= 0 || vehicleInfoReceivedAtMs <= 0L) {
+            return 0;
+        }
+        long elapsed = Math.max(0L,
+            System.currentTimeMillis() - vehicleInfoReceivedAtMs) / 1000L;
+        return (int) Math.max(0L, base - elapsed);
+    }
+
+    /**
+     * 冷却文案统一格式：分钟:秒（{@code m:ss}），秒数不足两位补零
+     * （例如 {@code 0:05}、{@code 12:05}）。技能按钮与载具行共用这一份实现。
+     */
+    static String formatCooldown(int seconds) {
+        int safe = Math.max(0, seconds);
+        int minutes = safe / 60;
+        int rest = safe % 60;
+        return minutes + ":" + (rest < 10 ? "0" : "") + rest;
+    }
+
+    /** 单行文案：沿用原载具窗口的关键信息（名称 + 就绪/冷却/已满 + 刷新周期）。 */
+    private String vehicleInfoRowLabel(UnifiedDeployScreenPacket.VehicleInfo vehicle) {
+        int remaining = vehicleCooldownSeconds(vehicle);
+        String name = vehicle.displayName == null ? vehicle.type : vehicle.displayName;
+        String marker;
+        String nameColor;
+        String status;
+        if (remaining > 0) {
+            marker = "\u00a77  ";
+            nameColor = "\u00a78";
+            status = "\u00a7c冷却 " + formatCooldown(remaining);
+        } else if (vehicle.current >= vehicle.max) {
+            marker = "\u00a77  ";
+            nameColor = "\u00a78";
+            status = "\u00a76已满 " + vehicle.current + "/" + vehicle.max;
+        } else {
+            marker = "\u00a7a\u25b6 ";
+            nameColor = "\u00a7f";
+            status = "\u00a7a就绪 " + vehicle.current + "/" + vehicle.max;
+        }
+        String respawn = vehicle.respawnMinutes > 0
+            ? " \u00a77(" + vehicle.respawnMinutes + "分刷新)" : "";
+        return marker + nameColor + name + "  " + status + respawn;
+    }
+
+    // ===== 通用确认框（退出 / 解散 / 踢人）=====
+
+    private void openLeaveSquadConfirm() {
+        openSquadConfirm("退出小队",
+            "退出后将清空你的职业与装备。确定退出当前小队？",
+            () -> NetworkManager.leaveSquad());
+    }
+
+    private void openDisbandSquadConfirm() {
+        if (!inSquad() || !isLocalPlayerLeader()) {
+            return;
+        }
+        openSquadConfirm("解散小队",
+            "解散后全队成员都会离队，且所有成员的职业与装备都会被清空。确定解散？",
+            () -> NetworkManager.deleteSquad(mySquadId));
+    }
+
+    /**
+     * 红色「重新部署」按钮（载具信息右侧）：二次确认后请求服务端立刻击杀自己。
+     * 对战阶段按阵亡规则扣除兵力，部署阶段不扣。
+     */
+    private void openRedeployConfirm() {
+        boolean battle = ClientGameState.getCurrentPhase() == GamePhase.BATTLE;
+        openSquadConfirm("重新部署",
+            battle
+                ? "对战阶段重新部署会立刻阵亡，并按本职业扣除兵力。确定重新部署？"
+                : "部署阶段重新部署不会扣除兵力，会立刻阵亡并重选部署点。确定？",
+            NetworkManager::requestRedeploy);
+    }
+
+    /**
+     * 打开居中确认框；默认高亮"取消"以防误触（Enter 不会命中确定）。
+     */
+    private void openSquadConfirm(String title, String body, Runnable onConfirm) {
+        if (squadConfirmRoot == null) {
+            return;
+        }
+        closeVariantPopup();
+        closeFireteamContextMenu();
+        closeSquadCategoryPopup();
+        squadConfirmTitle = title == null ? "" : title;
+        squadConfirmBody = body == null ? "" : body;
+        squadConfirmAction = onConfirm;
+
+        squadConfirmRoot.clearChildren();
+        int w = Math.min(320, Math.max(200, this.width - 40));
+        int h = 46 + BTN_H + 10;
+        int x = (this.width - w) / 2;
+        int y = (this.height - h) / 2;
+        squadConfirmRoot.addChild(new GuiElement(0, 0, this.width, this.height) {
+            @Override
+            public boolean onMouseClick(int mx, int my, int button) {
+                closeSquadConfirm();
+                return true;
+            }
+        });
+        // 二次确认弹窗：玻璃卡片（自带阴影/发丝边，比底层面板更"实"以压住背景）
+        squadConfirmRoot.addChild(EspetroAuiWidgets.panel(x, y, w, h, UiTheme.GLASS_PANEL, UiTheme.HAIRLINE_STRONG));
+        squadConfirmRoot.addChild(new PlainText(x + 8, y + 6,
+            squadConfirmTitle, UiTheme.GOLD));
+        squadConfirmRoot.addChild(new PlainText(x + 8, y + 22,
+            EspetroAuiWidgets.trimToWidth("\u00a7f" + squadConfirmBody,
+                Math.max(60, (int) ((w - 16) / UI_TEXT_SCALE))),
+            UiTheme.TEXT_SECOND));
+
+        int by = y + h - BTN_H - 5;
+        EspButton ok = new EspButton(x + w - 8 - 64, by, 64, BTN_H, "\u00a7c确定",
+            () -> {
+                Runnable action = squadConfirmAction;
+                closeSquadConfirm();
+                if (action != null) {
+                    action.run();
+                }
+            });
+        ok.setTextScale(UI_TEXT_SCALE);
+        ok.normalColor = UiTheme.ATTACK_SOFT;
+        ok.hoverColor = UiTheme.withAlpha(UiTheme.ATTACK, 0x30);
+        squadConfirmRoot.addChild(ok);
+        // 默认高亮"取消"：视觉上加亮 + 置于左侧（Enter 无绑定，避免误确认）
+        EspButton cancel = new EspButton(x + 8, by, 64, BTN_H, "\u00a7e取消",
+            this::closeSquadConfirm);
+        cancel.setTextScale(UI_TEXT_SCALE);
+        cancel.normalColor = UiTheme.POSITIVE_SOFT;
+        cancel.hoverColor = UiTheme.withAlpha(UiTheme.POSITIVE, 0x24);
+        squadConfirmRoot.addChild(cancel);
+
+        squadConfirmRoot.setVisible(true);
+    }
+
+    private void closeSquadConfirm() {
+        squadConfirmTitle = "";
+        squadConfirmBody = "";
+        squadConfirmAction = null;
+        if (squadConfirmRoot != null) {
+            squadConfirmRoot.clearChildren();
+            squadConfirmRoot.setVisible(false);
+        }
+    }
+
+    private boolean hasSquadConfirm() {
+        return squadConfirmRoot != null && squadConfirmRoot.isVisible();
+    }
+
+    /** 供外部（数据包）刷新队伍类型列表；保留内联输入框名称与当前选中项。 */
+    public void updateSquadCategories(List<UnifiedDeployScreenPacket.SquadCategoryInfo> updated) {
+        if (updated == null) {
+            return;
+        }
+        boolean changed = !sameSquadCategories(squadCategories, updated);
+        squadCategories.clear();
+        squadCategories.addAll(updated);
+        if (!changed) {
+            return;
+        }
+        if (!squadCategoryIdValid()) {
+            squadCreateCategoryId = defaultSquadCategoryId();
+        }
+        refreshSquadCategoryDropButton();
+        if (hasSquadCategoryPopup()) {
+            openSquadCategoryPopup();   // 上拉菜单开着：按新列表重建
+        }
+    }
+
+    private static boolean sameSquadCategories(
+            List<UnifiedDeployScreenPacket.SquadCategoryInfo> a,
+            List<UnifiedDeployScreenPacket.SquadCategoryInfo> b) {
+        if (a == b) {
+            return true;
+        }
+        if (a == null || b == null || a.size() != b.size()) {
+            return false;
+        }
+        for (int i = 0; i < a.size(); i++) {
+            if (!Objects.equals(a.get(i).id, b.get(i).id)
+                || !Objects.equals(a.get(i).displayName, b.get(i).displayName)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     // ---------- 职业选择（中上，5行网格）----------
     private static final int ICON_BTN = 15;          // 按钮边长 = 2/3 * CLASS_BTN_H
-    private static final int ICON_GRID_GAP = 2;      // 图标间距
-    private static final int ROW_LABEL_W = 10;       // 行标宽度
+    /** 需求 3-4：图标间距由 2px 收紧到 1px，职业按钮排列更紧密。 */
+    private static final int ICON_GRID_GAP = 1;      // 图标间距
+    /** 需求 3-4：行标宽度同步收紧（15px 分类图标 + 1px 间隙）。 */
+    private static final int ROW_LABEL_W = 17;       // 行标宽度（放宽以容纳职业分类图标）
+    /** 需求 3-4：图标行之间的额外垂直间隙（实际排间距 = ICON_GRID_GAP + 此值 = 3px）。 */
+    private static final int CLASS_ROW_EXTRA_GAP = 2;
+    /** 需求 3-1：排间分隔线相对下一排顶部的上移量：1px 细线落在上一排图标下沿。 */
+    private static final int CLASS_ROW_DIVIDER_LIFT = 3;
+    /** 职业分类图标：命令支援 / 直接战斗 / 火力支援 / 专业兵（黄色渲染）。 */
+    private static final ResourceLocation[] ROW_CATEGORY_ICONS = {
+        ResourceLocation.fromNamespaceAndPath("espetro", "textures/gui/roles/role_category_commandsupport.png"),
+        ResourceLocation.fromNamespaceAndPath("espetro", "textures/gui/roles/role_category_directcombat.png"),
+        ResourceLocation.fromNamespaceAndPath("espetro", "textures/gui/roles/role_category_firesupport.png"),
+        ResourceLocation.fromNamespaceAndPath("espetro", "textures/gui/roles/role_category_specialist.png"),
+    };
 
     private void buildClassSection(GuiElement sectionRoot) {
         int sx = classAreaX, sy = classAreaY;
         int areaW = classAreaW, areaH = classAreaH;
 
-        classTitleText = new PlainText(sx, sy, buildClassTitle(), 0xFFFFAA00);
+        classTitleText = new PlainText(sx, sy, buildClassTitle(), UiTheme.GOLD);
         sectionRoot.addChild(classTitleText);
         lastDisplayedClassSwitchCooldown = getClassSwitchCooldownRemaining();
         lastClassSelectionLocationAllowed = isClassSelectionLocationAllowed();
@@ -1237,13 +2380,26 @@ public class UnifiedDeployScreen extends MutilScreen {
         for (int r = 1; r <= 5; r++) {
             var rowList = rows.get(r);
             if (rowList.isEmpty()) continue;
+            // 排与排之间一条细白线（第一排之前不画）
+            // 需求 3-1：上一轮曾加粗到 2px，本轮按要求"只移动、不加粗"
+            if (gy > 0) {
+                // 需求 3-1：恢复 1px 细线，并整体上移到上一排图标下沿
+                // （不再压在排间空隙里；颜色与横跨宽度保持不变）。
+                classScrollList.addChild(new Divider(0, gy - CLASS_ROW_DIVIDER_LIFT,
+                    contentW, UiTheme.HAIRLINE_STRONG, 1));
+            }
+            // 该排左侧的分类图标（黄色渲染），图标之后就是这一排的职业按钮
+            if (r >= 1 && r <= ROW_CATEGORY_ICONS.length) {
+                classScrollList.addChild(new CategoryIcon(ROW_CATEGORY_ICONS[r - 1], 1, gy, ICON_BTN));
+            }
             for (int i = 0; i < rowList.size(); i++) {
                 int col = i % cols;
                 int bx = ROW_LABEL_W + col * (ICON_BTN + ICON_GRID_GAP);
                 int by = gy + (i / cols) * (ICON_BTN + ICON_GRID_GAP);
                 addClassIconButton(rowList.get(i), rowList, bx, by, ICON_BTN);
             }
-            gy += ((rowList.size() + cols - 1) / cols) * (ICON_BTN + ICON_GRID_GAP) + 2;
+            gy += ((rowList.size() + cols - 1) / cols) * (ICON_BTN + ICON_GRID_GAP)
+                + CLASS_ROW_EXTRA_GAP;
         }
 
         // row=0 职业（载具兵等）紧凑列表
@@ -1256,6 +2412,8 @@ public class UnifiedDeployScreen extends MutilScreen {
 
             EspButton btn = new EspButton(0, gy, contentW, ICON_BTN + 2, label,
                 () -> selectClass(classes.indexOf(cls)));
+            btn.setTransparentIdle();   // 职业栏保持透明（仅悬停高亮 / 选中淡黄）
+            btn.setSelected(isSelectedClass(cls), classBgSelectedColor());
             btn.setIcon(RoleIconResources.resolve(cls.iconImage, cls.icon),
                 RoleIconResources.TEXTURE_SIZE, RoleIconResources.TEXTURE_SIZE);
             btn.setIconSize(ICON_BTN);
@@ -1265,15 +2423,17 @@ public class UnifiedDeployScreen extends MutilScreen {
             btn.setDisabledAction(() -> selectClass(classes.indexOf(cls)));
             if (disabled) {
                 boolean coolingDown = getClassSwitchCooldownRemaining() > 0;
+                // 需求 3-4：职业按钮任何状态都不铺底色（禁用只靠图标变暗 + 文字变色）
                 btn.setDisabledStyle(
-                    coolingDown ? BTN_BG_DISABLED : CLASS_BG_UNAVAILABLE,
-                    coolingDown ? 0x60383848 : CLASS_BORDER_UNAVAILABLE,
-                    coolingDown ? 0xFF777777 : 0xFFFF9A9A);
+                    UiTheme.TRANSPARENT,
+                    coolingDown ? UiTheme.TEXT_DISABLED : classBorderUnavailableColor(),
+                    coolingDown ? UiTheme.TEXT_THIRD : UiTheme.ATTACK);
             }
             classScrollList.addChild(btn);
             classButtons.add(btn);
             classButtonToClassIndex.put(btn, classes.indexOf(cls));
-            gy += ICON_BTN + ICON_GRID_GAP + 2;
+            // 需求 3-4：紧凑职业行之间的空隙由 4px 收到 1px（按钮高 = ICON_BTN + 2）
+            gy += ICON_BTN + 2 + ICON_GRID_GAP;
         }
     }
 
@@ -1285,6 +2445,8 @@ public class UnifiedDeployScreen extends MutilScreen {
         boolean emphasizeRed = isClassEmphasizeRed(cls, disabled);
 
         EspButton btn = new EspButton(bx, by, size, size, "", () -> selectClass(clsIdx));
+        btn.setTransparentIdle();   // 职业栏保持透明（仅悬停高亮 / 选中淡黄）
+        btn.setSelected(isSelectedClass(cls), classBgSelectedColor());
         btn.setIcon(RoleIconResources.resolve(cls.iconImage, cls.icon),
             RoleIconResources.TEXTURE_SIZE, RoleIconResources.TEXTURE_SIZE);
         btn.setIconSize(size - 2);
@@ -1293,10 +2455,11 @@ public class UnifiedDeployScreen extends MutilScreen {
         btn.setDisabledAction(() -> selectClass(clsIdx));
         if (disabled) {
             boolean coolingDown = getClassSwitchCooldownRemaining() > 0;
+            // 需求 3-4：职业按钮任何状态都不铺底色（禁用只靠图标变暗 + 文字变色）
             btn.setDisabledStyle(
-                coolingDown ? BTN_BG_DISABLED : CLASS_BG_UNAVAILABLE,
-                coolingDown ? 0x60383848 : CLASS_BORDER_UNAVAILABLE,
-                coolingDown ? 0xFF777777 : 0xFFFF9A9A);
+                UiTheme.TRANSPARENT,
+                coolingDown ? UiTheme.TEXT_DISABLED : classBorderUnavailableColor(),
+                coolingDown ? UiTheme.TEXT_THIRD : UiTheme.ATTACK);
         }
         classScrollList.addChild(btn);
         classButtons.add(btn);
@@ -1309,7 +2472,7 @@ public class UnifiedDeployScreen extends MutilScreen {
         int areaW = deployAreaW, areaH = deployAreaH;
 
         // 标题 + 倒计时
-        sectionRoot.addChild(new PlainText(sx, sy, buildDeployTitle(), 0xFFFFAA00));
+        sectionRoot.addChild(new PlainText(sx, sy, buildDeployTitle(), UiTheme.GOLD));
 
         // 滚轮列表区域
         int listY = sy + SECTION_TITLE_H + 2;
@@ -1334,9 +2497,9 @@ public class UnifiedDeployScreen extends MutilScreen {
         int btnSpacing = 1;
         int row = 0;
 
-        // 原部署点
+        // 主基地
         if (hasDeployPoint) {
-            String deployLabel = "\u00a7e\u25c6 原部署点 \u00a77(" + deployPointPos + ")";
+            String deployLabel = "\u00a7e\u25c6 主基地 \u00a77(" + deployPointPos + ")";
             String deployCommand = "bastion deploy";
             EspButton btn = new EspButton(
                 2, row * (BTN_H + btnSpacing), btnW, BTN_H,
@@ -1351,6 +2514,21 @@ public class UnifiedDeployScreen extends MutilScreen {
         // 兵站/前哨列表。重新部署入口放在底部状态栏。
         for (var b : bastions) {
             final var bid = b.id;
+            if (b.isMain()) {
+                String deployCmd = "bastion deploy " + (b.getMainIndex() + 1);
+                String deployLabel = "\u00a7e\u25c6 " + b.name
+                    + (b.status.isBlank() ? "" : " \u00a77[" + b.status + "]");
+                EspButton mainButton = new EspButton(
+                    2, row * (BTN_H + btnSpacing), btnW, BTN_H,
+                    deployLabel,
+                    () -> selectDeploymentPoint(b.pos, deployCmd)
+                );
+                mainButton.setEnabled(waitingForDeploySelection);
+                registerDeployButton(mainButton, b.pos, deployCmd, deployLabel,
+                    0L, deployLabel, 0);
+                row++;
+                continue;
+            }
             if (b.isOutpost()) {
                 String deployCmd = "outpost deploy " + (b.getOutpostIndex() + 1);
                 String deployLabel = "\u00a7d\u25c6 " + b.name
@@ -1423,6 +2601,7 @@ public class UnifiedDeployScreen extends MutilScreen {
             "\u00a77选择部署点",
             this::confirmDeploymentPoint
         );
+        confirmDeployButton.setPlainBlack();   // 需求 6：原"有边框、没底色" → 无边框 + 黑半透底
         confirmDeployButton.setEnabled(false);
         sectionRoot.addChild(confirmDeployButton);
     }
@@ -1446,6 +2625,7 @@ public class UnifiedDeployScreen extends MutilScreen {
         } else {
             deployButtonWaveSeconds.remove(button);
         }
+        button.setPlainBlack();   // 部署点按钮统一黑底（原来是完全透明的，压在毛玻璃上看不出是按钮）
         button.setLabel(buildDeployButtonLabel(
             buildLiveDeployBaseLabel(button, baseLabel), positionText, command));
     }
@@ -1676,7 +2856,8 @@ public class UnifiedDeployScreen extends MutilScreen {
 
     private String buildRedeployLabel() {
         int remaining = getRedeployCooldownRemaining();
-        return remaining > 0 ? "\u00a77重新部署 " + remaining + "s" : "\u00a7c重新部署";
+        // 与地图页脚新的通用「重新部署」按钮区分：此按钮仅防守方、仅布防期、走 /outpost redeploy
+        return remaining > 0 ? "\u00a77前哨重部署 " + remaining + "s" : "\u00a7c前哨重部署";
     }
 
     @Override
@@ -1695,6 +2876,15 @@ public class UnifiedDeployScreen extends MutilScreen {
             outpostRedeployButton.setEnabled(
                 !waitingForDeploySelection && getRedeployCooldownRemaining() == 0);
         }
+        // 指挥官技能：冷却倒数每秒刷新；技能列表变化时按需重建整段。
+        int skillSignature = TacticalRadialController.skillSnapshotSignature();
+        if (skillSignature != lastSkillSignature) {
+            invalidateSections(Section.MAP_CONTROLS);
+        } else {
+            for (SkillButton button : skillButtons) {
+                button.refresh();
+            }
+        }
         // 仅更新 Rally 个人冷却文案，不重建部署区域。
         refreshRallyWaveLabels();
         // 更新 HAB 激活倒计时文案，激活完成后自动启用按钮。
@@ -1702,6 +2892,8 @@ public class UnifiedDeployScreen extends MutilScreen {
         refreshConfirmDeployButton();
         refreshClassSwitchCooldown();
         refreshClassSelectionLocation();
+        // 需求 3-3：载具上拉按钮文案与菜单内冷却倒计时每秒刷新
+        refreshVehicleInfoPopup();
         GovernanceStatePacket.TeamState governance = activeGovernance();
         if (governanceTimerText != null && governance != null) {
             governanceTimerText.setText("\u00a7e剩余 "
@@ -1730,91 +2922,351 @@ public class UnifiedDeployScreen extends MutilScreen {
     public void removed() {
         clearPendingDeploySelection();
         previewRenderer.clear();
+        closeSquadCategoryPopup();
+        closeVehicleInfoPopup();
+        closeSquadConfirm();
         super.removed();
     }
 
     // ---------- 战术地图（右半屏，由 HCR AAD / ESPoints 绘制）----------
+    /**
+     * 指挥官技能列：J 菜单地图面板左侧空白处竖排。
+     * 每个按钮三段居中：图标 / 名称 / 冷却（可用时显示「可用」）。
+     */
+    private void buildSkillColumn(GuiElement sectionRoot) {
+        skillButtons.clear();
+        // 只对本队指挥官显示技能列：isCommander 来自服务端 UnifiedDeployScreenPacket（权威）。
+        // 旧实现只信技能快照里的 isCommander，而该字段实际是「有技能入口」，且同步包只在
+        // 入服/当选时下发——被弹劾、换人、跨回合后客户端会残留 true，导致非指挥官也看到技能按钮。
+        if (!isCommander || !TacticalRadialController.hasSkillSnapshot()) {
+            lastSkillSignature = Integer.MIN_VALUE;
+            return;
+        }
+        List<CommanderSkillManager.SkillView> skills = TacticalRadialController.skillSnapshot();
+        if (skills.isEmpty()) {
+            lastSkillSignature = Integer.MIN_VALUE;
+            return;
+        }
+        int x = mapX + 9;   // 相对地图面板左下内边右移 5 像素
+        int y = mapY + 28;
+        int maxY = mapY + mapH - MAP_FOOTER_H - 6;
+        for (CommanderSkillManager.SkillView skill : skills) {
+            if (y + SKILL_BTN_H > maxY) {
+                break;   // 放不下就不再往下堆（技能数量通常 3~5 个）
+            }
+            SkillButton button = new SkillButton(x, y, SKILL_COL_W, SKILL_BTN_H, skill);
+            skillButtons.add(button);
+            sectionRoot.addChild(button);
+            y += SKILL_BTN_H + SKILL_BTN_GAP;
+        }
+        lastSkillSignature = TacticalRadialController.skillSnapshotSignature();
+    }
+
+    /** 技能按钮：自绘（半透明灰底 + 白边 + 居中图标/名称/冷却）。 */
+    private static final class SkillButton extends GuiElement {
+        private static final int ICON_SIZE = 16;
+        private final String skillId;
+        private final String skillName;
+        private final ResourceLocation skillIcon;
+        private int cooldownSeconds;
+        /** 防抖：同一次按住/拖动/连点只算一次，避免误触连发火炮。 */
+        private long lastActivateMs;
+
+        SkillButton(int x, int y, int width, int height, CommanderSkillManager.SkillView skill) {
+            super(x, y, width, height);
+            this.skillId = skill.id();
+            this.skillName = skill.displayName();
+            this.skillIcon = TacticalRadialController.skillIcon(skill);
+            refresh();
+        }
+
+        /** 每秒调用：取全局锚点推算出的剩余秒数（重建菜单也不会重新计时）。 */
+        void refresh() {
+            cooldownSeconds = isDebugNoCooldown()
+                ? 0 : TacticalRadialController.skillCooldownSeconds(skillId);
+        }
+
+        /** 部署阶段所有技能不可用（服务端同样会拒绝）。 */
+        private static boolean isDeployPhase() {
+            return ClientGameState.getCurrentPhase() == GamePhase.DEPLOYING;
+        }
+
+        /** 调试模式（/gamerule espetroSkillNoCooldown true）：忽略冷却。 */
+        private static boolean isDebugNoCooldown() {
+            net.minecraft.client.multiplayer.ClientLevel level = Minecraft.getInstance().level;
+            return level != null && org.espetro.debug.EspetroDebugRules
+                .skillNoCooldown(level.getGameRules());
+        }
+
+        private boolean isUsable() {
+            return (cooldownSeconds <= 0 || isDebugNoCooldown())
+                && !CommanderSkillTargetRequest.isPending(skillId)
+                && !isDeployPhase();
+        }
+
+        @Override
+        public boolean onMouseClick(int mouseX, int mouseY, int button) {
+            // 关键：GuiElement 不会替叶子元素做范围判定（它只转发给子元素），
+            // 所以必须自己判断命中，否则这个按钮会吞掉整个界面的左键点击。
+            if (mouseX < getX() || mouseX >= getX() + getWidth()
+                || mouseY < getY() || mouseY >= getY() + getHeight()) {
+                return false;
+            }
+            if (button != 0 || !isUsable()) {
+                return false;
+            }
+            long now = System.currentTimeMillis();
+            if (now - lastActivateMs < 600L) {
+                return true;   // 600ms 内的重复触发直接吞掉
+            }
+            lastActivateMs = now;
+            // 不再关闭 J 菜单：需要选点的技能由服务端回包进入火炮选点模式，
+            // 指挥官直接在这张地图上操作即可。
+            CommanderSkillTargetRequest.arm(skillId);
+            NetworkManager.sendCommanderSkillActivate(skillId);
+            return true;
+        }
+
+        @Override
+        public void draw(GuiGraphics graphics, int x, int y, int width, int height,
+                         int mouseX, int mouseY, float partialTick) {
+            if (!isVisible()) {
+                return;
+            }
+            int px = x + getX();
+            int py = y + getY();
+            int w = getWidth();
+            int h = getHeight();
+            boolean deployLocked = isDeployPhase();
+            boolean usable = isUsable();
+            boolean pending = CommanderSkillTargetRequest.isPending(skillId);
+            boolean hover = usable && mouseX >= px && mouseX < px + w
+                && mouseY >= py && mouseY < py + h;
+
+            // 待用（已点击、尚未使用）金色高亮；可用为玻璃底 + 悬停提亮；冷却/不可用压暗
+            int fill;
+            if (pending) {
+                fill = UiTheme.CONTROL_SELECTED;
+            } else if (usable) {
+                fill = hover ? UiTheme.CONTROL_HOVER : UiTheme.CONTROL_NORMAL;
+            } else {
+                fill = UiTheme.CONTROL_DISABLED;
+            }
+            int radius = UiTheme.RADIUS_CONTROL;
+            UiPaint.roundRect(graphics, px, py, w, h, radius, fill);
+
+            var font = Minecraft.getInstance().font;
+            int centerX = px + w / 2;
+
+            // ① 技能图标（居中）
+            if (skillIcon != null) {
+                UiPaint.tint(graphics, usable ? UiTheme.TEXT : UiTheme.TEXT_DISABLED);
+                graphics.blit(skillIcon, centerX - ICON_SIZE / 2, py + 4, 0, 0,
+                    ICON_SIZE, ICON_SIZE, ICON_SIZE, ICON_SIZE);
+                graphics.setColor(1f, 1f, 1f, 1f);
+            }
+
+            // ② 技能名称（居中；列窄时自动缩小以完整显示）
+            int nameColor = pending ? UiTheme.GOLD : usable ? UiTheme.TEXT : UiTheme.TEXT_THIRD;
+            int nameWidth = font.width(skillName);
+            float nameScale = nameWidth + 6 <= w ? 1.0f : Math.max(0.5f, (w - 6f) / nameWidth);
+            graphics.pose().pushPose();
+            graphics.pose().translate(centerX, py + 22, 0.0D);
+            graphics.pose().scale(nameScale, nameScale, 1.0f);
+            graphics.drawCenteredString(font, skillName, 0, 0, nameColor);
+            graphics.pose().popPose();
+
+            // ③ 冷却 / 可用（居中，字体更小）
+            String cooldownText = deployLocked ? "不可用"
+                : pending ? "选点中"
+                : usable ? "可用" : formatCooldown(cooldownSeconds);
+            int cooldownColor = deployLocked ? UiTheme.TEXT_THIRD
+                : usable ? UiTheme.POSITIVE : UiTheme.TEXT_SECOND;
+            graphics.pose().pushPose();
+            graphics.pose().translate(centerX, py + 37, 0.0D);
+            graphics.pose().scale(0.75f, 0.75f, 1.0f);
+            graphics.drawCenteredString(font, cooldownText, 0, 0, cooldownColor);
+            graphics.pose().popPose();
+
+            super.draw(graphics, x, y, width, height, mouseX, mouseY, partialTick);
+        }
+
+        /** 冷却文案统一走外层 UnifiedDeployScreen#formatCooldown（m:ss）。 */
+        private static String formatCooldown(int seconds) {
+            return UnifiedDeployScreen.formatCooldown(seconds);
+        }
+    }
+
     private void buildMapPanel(GuiElement sectionRoot) {
+        // bug 修复：地图控制区重建（rebuildMapControls 会被“技能冷却每秒变化”等
+        // tick 事件触发）时**不得**关闭载具上拉菜单，否则玩家打开后一两秒就会看到
+        // 弹层自己关掉。这里只释放按钮引用，弹层保持打开，重建后重新贴靠（见下方）。
+        vehicleInfoDropButton = null;
+        buildSkillColumn(sectionRoot);
         governanceVoteButtons.clear();
         int bx = mapX + 5;
         int by = mapY + mapH - BTN_H - 4;
         EspButton score = new EspButton(bx, by, 64, BTN_H, "\u00a76玩家分数板",
             () -> Minecraft.getInstance().setScreen(new MatchScoreboardScreen(this)));
         score.setTextScale(UI_TEXT_SCALE);
+        score.setPlainBlack();   // 需求 6：原"有边框、没底色" → 无边框 + 黑半透底
         sectionRoot.addChild(score);
+        int nextX = bx + 68;
 
         GovernanceStatePacket.TeamState state = activeGovernance();
         boolean battle = ClientGameState.getCurrentPhase() == GamePhase.BATTLE;
-        if (battle && (state == null || "IDLE".equals(state.state))) {
-            EspButton impeach = new EspButton(bx + 68, by, 56, BTN_H, "\u00a7c发起弹劾",
+        boolean idle = state == null || "IDLE".equals(state.state);
+
+        if (battle && idle) {
+            EspButton impeach = new EspButton(nextX, by, 56, BTN_H, "\u00a7c发起弹劾",
                 () -> NetworkManager.sendGovernanceAction(
                     GovernanceActionPacket.Action.START_IMPEACHMENT, null));
             impeach.setTextScale(UI_TEXT_SCALE);
+            impeach.setPlainBlack();   // 需求 6：原"有边框、没底色" → 无边框 + 黑半透底
             sectionRoot.addChild(impeach);
+            nextX += 60;
+        }
+        if (battle) {
+            // 需求 3-3：原「载具信息」按钮（点击打开独立载具窗口）改为面板内上拉菜单入口
+            buildVehicleInfoButton(sectionRoot, nextX, by);
+            nextX += 68;
+            // bug 修复：弹层若开着 → 就地重建并重新贴靠到新按钮位置（保持打开与滚动位置）
+            refreshVehicleInfoPopupLayout(true);
+        } else {
+            // 已不在对战阶段、按钮消失：关闭弹层，避免留下无主浮层
+            closeVehicleInfoPopup();
+        }
 
-            EspButton vehicleInfo = new EspButton(bx + 128, by, 64, BTN_H, "\u00a7b载具信息",
-                () -> NetworkManager.requestVehicleInfo());
-            vehicleInfo.setTextScale(UI_TEXT_SCALE);
-            sectionRoot.addChild(vehicleInfo);
+        // 重新部署（红色，载具信息右侧）：立刻阵亡并重选部署点；
+        // 对战阶段按阵亡规则扣兵力，部署阶段不扣。需二次确认。
+        EspButton redeploy = new EspButton(nextX, by, 72, BTN_H, "\u00a7f\u00a7l重新部署",
+            this::openRedeployConfirm);
+        redeploy.setTextScale(UI_TEXT_SCALE);
+        // 需求 6：原本就有底色（红色）→ 只去掉边框，底色保留
+        redeploy.normalColor = redeployBgNormalColor();
+        redeploy.hoverColor = redeployBgHoverColor();
+        redeploy.setEnabled(!waitingForDeploySelection);
+        sectionRoot.addChild(redeploy);
+        nextX += 76;
+
+        if (idle) {
             return;
         }
 
-        if (state == null || "IDLE".equals(state.state)) {
-            return;
+        // 所有指挥官治理投票（弹劾 / 空缺志愿 / 空缺公投）一律使用地图右侧可关闭的小窗，
+        // 不再整块盖住战术地图；关闭后最小化为「载具信息」右侧的按钮，点击重新打开。
+        boolean impeachment = "IMPEACHMENT_VOTE".equals(state.state);
+        if (governanceWindowMinimized) {
+            EspButton restore = new EspButton(nextX, by, 60, BTN_H,
+                impeachment ? "\u00a7c弹劾投票" : "\u00a7a指挥官补位",
+                () -> {
+                    governanceWindowMinimized = false;
+                    invalidateSections(Section.MAP_CONTROLS);
+                });
+            restore.setTextScale(UI_TEXT_SCALE);
+            restore.setPlainBlack();   // 需求 6：原"有边框、没底色" → 无边框 + 黑半透底
+            sectionRoot.addChild(restore);
+        } else {
+            buildGovernanceWindow(sectionRoot, state);
         }
+    }
 
-        int governanceH = Math.max(20, mapH - MAP_FOOTER_H - 6);
-        sectionRoot.addChild(new GuiRect(mapX + 3, mapY + 3, mapW - 6, governanceH, 0xE0181818));
-        String stateTitle = switch (state.state) {
-            case "IMPEACHMENT_VOTE" -> "弹劾投票";
-            case "VACANCY_VOLUNTEER" -> "指挥官空缺";
-            case "VACANCY_VOTE" -> "空缺公投";
-            default -> state.state;
-        };
-        sectionRoot.addChild(new PlainText(mapX + 10, mapY + 30,
-            "\u00a76\u00a7l指挥官治理：" + stateTitle, 0xFFFFC766));
-        governanceTimerText = new PlainText(mapX + 10, mapY + 43,
-            "\u00a7e剩余 " + ClientGovernanceState.secondsLeft(state) + "s", 0xFFFFD27A);
+    /** 需求 3-3：载具信息上拉菜单的入口按钮（位置与尺寸沿用原「载具信息」按钮）。 */
+    private void buildVehicleInfoButton(GuiElement sectionRoot, int x, int y) {
+        vehicleInfoButtonX = x;
+        vehicleInfoButtonY = y;
+        vehicleInfoButtonW = 64;
+        vehicleInfoButtonH = BTN_H;
+        vehicleInfoDropButton = new EspButton(x, y, vehicleInfoButtonW, vehicleInfoButtonH,
+            vehicleInfoDropLabel(), this::toggleVehicleInfoPopup);
+        vehicleInfoDropButton.setTextScale(UI_TEXT_SCALE);
+        vehicleInfoDropButton.setPlainBlack();   // 需求 6：无边框 + 黑半透底
+        sectionRoot.addChild(vehicleInfoDropButton);
+    }
+
+    /** 指挥官治理（弹劾 / 空缺志愿 / 空缺公投）：贴在地图右侧的小窗，可关闭（最小化）为页脚按钮。 */
+    private void buildGovernanceWindow(GuiElement sectionRoot, GovernanceStatePacket.TeamState state) {
+        boolean volunteerPhase = "VACANCY_VOLUNTEER".equals(state.state);
+        boolean impeachment = "IMPEACHMENT_VOTE".equals(state.state);
+        int w = Math.min(impeachment ? IMPEACH_WINDOW_W : VACANCY_WINDOW_W, Math.max(120, mapW - 16));
+        int x = mapX + mapW - w - 6;
+        int y = mapY + 6;
+
+        // 高度按内容行数估算：标题区 + 投票/志愿行 + 已志愿文本
+        int bodyH = 10 + BTN_H + 2
+            + (impeachment ? 36 : volunteerPhase ? 10 : Math.max(1, state.volunteers.size()) * 18);
+        int h = Math.min(VACANCY_WINDOW_HEADER_H + bodyH + 6,
+            Math.max(64, mapH - MAP_FOOTER_H - 16));
+
+        sectionRoot.addChild(new GuiRect(x - 3, y - 3, w + 6, h + 6, UiTheme.TRANSPARENT));
+        sectionRoot.addChild(new GuiRect(x, y, w, h, UiTheme.TRANSPARENT));
+
+        sectionRoot.addChild(new PlainText(x + 6, y + 4,
+            (impeachment ? "弹劾投票" : volunteerPhase ? "指挥官空缺" : "空缺公投"),
+            UiTheme.GOLD));
+        governanceTimerText = new PlainText(x + 6, y + 17,
+            "\u00a7e剩余 " + ClientGovernanceState.secondsLeft(state) + "s", UiTheme.GOLD);
         sectionRoot.addChild(governanceTimerText);
-        int rowY = mapY + 60;
-        if ("IMPEACHMENT_VOTE".equals(state.state)) {
-            addGovernanceVoteButton(sectionRoot, state, state.commander, "原指挥官", rowY,
-                GovernanceActionPacket.Action.VOTE_IMPEACHMENT);
-            addGovernanceVoteButton(sectionRoot, state, state.challenger, "挑战者", rowY + 18,
-                GovernanceActionPacket.Action.VOTE_IMPEACHMENT);
-        } else if ("VACANCY_VOLUNTEER".equals(state.state)) {
-            EspButton volunteer = new EspButton(mapX + 10, rowY, Math.max(80, mapW - 20), BTN_H,
-                "\u00a7a志愿补位", () -> NetworkManager.sendGovernanceAction(
+
+        // 关闭：最小化为「载具信息」右侧按钮
+        EspButton close = new EspButton(x + w - 36, y + 3, 32, BTN_H, "\u00a7c关闭",
+            () -> {
+                governanceWindowMinimized = true;
+                invalidateSections(Section.MAP_CONTROLS);
+            });
+        close.setTextScale(UI_TEXT_SCALE);
+        close.setPlainBlack();   // 需求 6：原"有边框、没底色" → 无边框 + 黑半透底
+        sectionRoot.addChild(close);
+
+        int contentX = x + 6;
+        int contentW = w - 12;
+        int cy = y + VACANCY_WINDOW_HEADER_H;
+        if (impeachment) {
+            int y2 = cy;
+            addGovernanceVoteButton(sectionRoot, state, state.commander, "原指挥官",
+                contentX, y2, contentW, GovernanceActionPacket.Action.VOTE_IMPEACHMENT);
+            y2 += 18;
+            addGovernanceVoteButton(sectionRoot, state, state.challenger, "挑战者",
+                contentX, y2, contentW, GovernanceActionPacket.Action.VOTE_IMPEACHMENT);
+        } else if (volunteerPhase) {
+            EspButton volunteer = new EspButton(contentX, cy, contentW, BTN_H, "\u00a7a志愿补位",
+                () -> NetworkManager.sendGovernanceAction(
                     GovernanceActionPacket.Action.VOLUNTEER_VACANCY, null));
             volunteer.setTextScale(UI_TEXT_SCALE);
+            volunteer.setPlainBlack();   // 需求 6：原"有边框、没底色" → 无边框 + 黑半透底
             sectionRoot.addChild(volunteer);
+            cy += BTN_H + 3;
             if (!state.volunteers.isEmpty()) {
                 String names = state.volunteers.stream()
                     .map(MatchScoreboardScreen::nameFor)
                     .reduce((a, b) -> a + ", " + b).orElse("");
-                sectionRoot.addChild(new PlainText(mapX + 10, rowY + 18,
-                    "\u00a77已志愿: " + names, 0xFFB0B0B0));
+                sectionRoot.addChild(new PlainText(contentX, cy,
+                    EspetroAuiWidgets.trimToWidth("\u00a77已志愿: " + names,
+                        Math.max(8, (int) (contentW / UI_TEXT_SCALE))),
+                    UiTheme.TEXT_SECOND));
             }
-        } else if ("VACANCY_VOTE".equals(state.state)) {
-            int y = rowY;
+        } else {
+            int y2 = cy;
             for (UUID volunteer : state.volunteers) {
-                addGovernanceVoteButton(sectionRoot, state, volunteer, "志愿者", y,
-                    GovernanceActionPacket.Action.VOTE_VACANCY);
-                y += 18;
-                if (y > mapY + mapH - MAP_FOOTER_H - 18) break;
+                addGovernanceVoteButton(sectionRoot, state, volunteer, "志愿者",
+                    contentX, y2, contentW, GovernanceActionPacket.Action.VOTE_VACANCY);
+                y2 += 18;
+                if (y2 + 16 > y + h - 4) break;
             }
         }
     }
 
     private void addGovernanceVoteButton(GuiElement sectionRoot,
                                          GovernanceStatePacket.TeamState state,
-                                         UUID candidate, String prefix, int y,
+                                         UUID candidate, String prefix,
+                                         int x, int y, int width,
                                          GovernanceActionPacket.Action action) {
         if (candidate == null) return;
-        EspButton button = new EspButton(mapX + 10, y, Math.max(80, mapW - 20), BTN_H,
+        EspButton button = new EspButton(x, y, Math.max(80, width), BTN_H,
             buildVoteButtonLabel(state, candidate, prefix),
             () -> NetworkManager.sendGovernanceAction(action, candidate));
         button.setTextScale(UI_TEXT_SCALE);
+        button.setPlainBlack();   // 需求 6：原"有边框、没底色" → 无边框 + 黑半透底
         sectionRoot.addChild(button);
         governanceVoteButtons.put(candidate.toString(), button);
     }
@@ -1833,19 +3285,22 @@ public class UnifiedDeployScreen extends MutilScreen {
     // ---------- 底部状态栏 ----------
     private void buildStatusBar(GuiElement sectionRoot) {
         int barY = this.height - STATUS_BAR_H;
-        sectionRoot.addChild(new GuiRect(0, barY, this.width, STATUS_BAR_H, CHROME_BG));
+        sectionRoot.addChild(new GuiRect(0, barY, this.width, STATUS_BAR_H,
+            UiTheme.alpha(chromeBgColor(), 0.92f)));
 
-        statusText = new PlainText(5, barY + 3, buildStatusText(), BTN_TEXT);
+        statusText = new PlainText(5, barY + 3, buildStatusText(), btnTextColor());
         sectionRoot.addChild(statusText);
 
         boolean hasOutpost = bastions.stream().anyMatch(UnifiedDeployScreenPacket.BastionItem::isOutpost);
         if (deployTimeRemaining >= 0 && "DEFEND".equals(team) && hasOutpost) {
-            int redeployW = 66;
+            // 「前哨重部署」：比地图页脚的通用「重新部署」更长，宽度放宽避免文案被裁
+            int redeployW = 78;
             outpostRedeployButton = new EspButton(
                 this.width - redeployW - 4, barY + 1, redeployW, STATUS_BAR_H - 2,
                 buildRedeployLabel(),
                 () -> { var p = Minecraft.getInstance().player; if (p != null) p.connection.sendCommand("outpost redeploy"); }
             );
+            outpostRedeployButton.setPlainBlack();   // 需求 6：原"有边框、没底色" → 无边框 + 黑半透底
             outpostRedeployButton.setEnabled(
                 !waitingForDeploySelection && getRedeployCooldownRemaining() == 0);
             sectionRoot.addChild(outpostRedeployButton);
@@ -1853,7 +3308,7 @@ public class UnifiedDeployScreen extends MutilScreen {
     }
 
     private String buildDeployTitle() {
-        return "\u00a76\u00a7l部署点";
+        return "部署点";
     }
 
     private String formatTime(int seconds) {
@@ -1866,7 +3321,7 @@ public class UnifiedDeployScreen extends MutilScreen {
     private void refreshTitleTimer() {
         if (statusTimerText == null) return;
 
-        String teamColor = "ATTACK".equals(team) ? "\u00a7c" : "\u00a79";
+        String teamColor = EspetroAuiWidgets.teamPrefix(team);
         GamePhase phase = ClientGameState.getCurrentPhase();
 
         // 左上角阶段名
@@ -1874,19 +3329,27 @@ public class UnifiedDeployScreen extends MutilScreen {
             case WAITING_FOR_PLAYERS -> "\u00a76\u00a7l等待";
             case LOBBY -> "\u00a76\u00a7l主城等待";
             case MAP_VOTE -> "\u00a76\u00a7l地图投票";
+            case MAP_REVEAL -> "\u00a76\u00a7l地图揭晓";
             case MAP_LOADING -> "\u00a76\u00a7l地图加载";
             case TEAM_SELECT -> "\u00a76\u00a7l选边";
-            case ATTACK_COMMANDER_VOTE, DEFEND_COMMANDER_VOTE -> "\u00a76\u00a7l指挥官投票";
+            case TEAM_ASSIGN_SHOW -> "\u00a76\u00a7l队伍分配";
+            case COMMANDER_VOTE, ATTACK_COMMANDER_VOTE, DEFEND_COMMANDER_VOTE -> "\u00a76\u00a7l指挥官投票";
             case ATTACK_FACTION_SELECT, DEFEND_FACTION_SELECT -> "\u00a76\u00a7l编制选择";
+            case FACTION_LOCK_REVEAL -> "\u00a76\u00a7l编制指定";
             case FACTION_REVEAL -> "\u00a76\u00a7l编制揭示";
             case DEPLOYING -> "\u00a76\u00a7l部署阶段";
             case BATTLE -> "\u00a76\u00a7l战斗阶段";
             case ROUND_END -> "\u00a76\u00a7l结算";
             case CLEANUP -> "\u00a76\u00a7l清理";
         };
+        String objectiveMode = ClientGameState.getObjectiveMode();
+        String modePart = objectiveMode != null
+            && (phase == GamePhase.DEPLOYING || phase == GamePhase.BATTLE)
+            ? " \u00a78· \u00a7e" + objectiveMode
+            : "";
         String factionPart = "\u00a77| " + teamColor + "\u00a7l" + factionIcon + " " + factionName;
-        String title = EspetroMutilWidgets.trimToWidth(
-            phaseName + " " + factionPart, Math.max(80, this.width - 96));
+        String title = EspetroAuiWidgets.trimToWidth(
+            phaseName + modePart + " " + factionPart, Math.max(80, this.width - 96));
         phaseTitleText.setText(title);
 
         // 右上角倒计时
@@ -1910,8 +3373,8 @@ public class UnifiedDeployScreen extends MutilScreen {
     }
 
     private String buildStatusText() {
-        String teamColor = "ATTACK".equals(team) ? "\u00a7c" : "\u00a79";
-        String teamName = "ATTACK".equals(team) ? "进攻方" : "防守方";
+        String teamColor = EspetroAuiWidgets.teamPrefix(team);
+        String teamName = EspetroAuiWidgets.teamName(team);
         String squadStr = "";
         for (var squad : squads) {
             if (squad.id == mySquadId) {
@@ -1936,6 +3399,11 @@ public class UnifiedDeployScreen extends MutilScreen {
             String command = deployButtonCommands.get(button);
             boolean ready = isDeployButtonSelectable(command);
             button.setEnabled(waitingForDeploySelection && ready && hasClass);
+            String position = deployButtonPositions.get(button);
+            // 选中的重生点：保持黑底，只叠一层很淡的白，避免整块变亮抢视线
+            button.setSelected(pendingDeployPosition != null
+                && pendingDeployPosition.equals(position),
+                UiTheme.CONTROL_SELECTED, true);
             if (waitingForDeploySelection && ready && !hasClass) {
                 button.setDisabledAction(() ->
                     EspetroTipNotifier.showDenial("未选择职业", "请先选择职业，再选择部署点。"));
@@ -2014,35 +3482,58 @@ public class UnifiedDeployScreen extends MutilScreen {
     // ==================== 渲染 ====================
 
     @Override
-    protected void renderBeforeMutil(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
-        CurrentMapBackgroundRenderer.render(
-            graphics, this.width, this.height, ClientGameState.getCurrentMapFolder());
+    protected void renderBeforeMenu(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
+        // The common Aui host has already drawn the blurred backdrop.
         computeRegions();
-        // 左/中列先铺实心，即使地图污染 GL 也不会露出世界。
-        graphics.fill(leftX, leftY, leftX + leftW, leftY + leftH, PANEL_LEFT_BG);
-        graphics.fill(centerX, centerY, centerX + centerW, centerY + centerH, PANEL_CENTER_BG);
+        // 已部署下来（不再等待部署选择）时面板转为浮在画面上的薄卡，仍保证白字可读。
+        // 各栏底色统一为"黑色半透明"平涂，透出后面的世界色块。
+        int leftBg = UiTheme.GLASS_PANEL;
+        int centerBg = waitingForDeploySelection ? UiTheme.GLASS_PANEL : UiTheme.TRANSPARENT;
+        int chromeBg = chromeBgColor();
+        int footerBg = panelMapFooterBgColor();
         UnifiedDeployScreenPacket.LoadoutPreview activePreview = getActivePreview();
         if (activePreview != null) {
             renderClassPreview(graphics, activePreview, mouseX, mouseY);
-        } else if (activeGovernance() == null || "IDLE".equals(activeGovernance().state)) {
+        } else if (shouldRenderTacticalMap()) {
             renderTacticalMap(graphics, partialTick);
         } else {
+            // 旧式治理覆盖层（弹劾投票等）整块盖住地图时不再绘制地图。
             int viewportH = Math.max(1, mapH - MAP_FOOTER_H);
-            graphics.fill(mapX, mapY, mapX + mapW, mapY + viewportH, PANEL_MAP_FOOTER_BG);
+            if (UiTheme.visible(footerBg)) {
+                UiPaint.roundRect(graphics, mapX, mapY, mapW, viewportH,
+                    UiTheme.RADIUS_CARD, footerBg);
+            }
         }
         // 地图/预览可能改动全局 RenderSystem；复位后再画 MUtil 树，避免左栏整页闪。
         resetGuiRenderState(graphics);
-        // 再盖一次左/中列，挡住地图 scissor 外溢。
-        graphics.fill(leftX, leftY, leftX + leftW, leftY + leftH, PANEL_LEFT_BG);
-        graphics.fill(centerX, centerY, centerX + centerW, centerY + centerH, PANEL_CENTER_BG);
-        graphics.fill(0, 0, this.width, TITLE_H, CHROME_BG);
-        // 阵营强调条属于稳定背景层，不加入会被局部更新影响的 MUtil 元素树。
-        graphics.fill(0, 0, 3, TITLE_H, teamAccentColor());
-        int barY = this.height - STATUS_BAR_H;
-        if (barY > TITLE_H) {
-            graphics.fill(0, barY, this.width, this.height, CHROME_BG);
+        // Map/model drawing completes before the single foreground glass tint.
+        if (UiTheme.visible(leftBg)) {
+            UiPaint.roundRect(graphics, leftX, leftY, leftW, leftH,
+                UiTheme.RADIUS_CARD, leftBg);
         }
+        if (UiTheme.visible(centerBg)) {
+            UiPaint.roundRect(graphics, centerX, centerY, centerW, centerH,
+                UiTheme.RADIUS_CARD, centerBg);
+        }
+        if (UiTheme.visible(chromeBg)) {
+            UiPaint.glassPanel(graphics, 0, 0, this.width, TITLE_H, chromeBg);
+        }
+        // Team color has meaning; keep one compact mark beside the heading.
+        UiPaint.roundRect(graphics, 0, 0, 2, TITLE_H, 0, teamAccentColor());
         renderStaticDividers(graphics);
+    }
+
+    /**
+     * 战术地图是否照常渲染：治理空闲，或指挥官空缺/志愿类治理已改为右侧小窗
+     * （不再整块盖住地图）时地图继续显示；仅旧式覆盖层（弹劾投票等）盖住地图时省略。
+     */
+    private boolean shouldRenderTacticalMap() {
+        GovernanceStatePacket.TeamState state = activeGovernance();
+        if (state == null || "IDLE".equals(state.state)) {
+            return true;
+        }
+        return "VACANCY_VOLUNTEER".equals(state.state)
+            || "VACANCY_VOTE".equals(state.state);
     }
 
     /**
@@ -2050,14 +3541,23 @@ public class UnifiedDeployScreen extends MutilScreen {
      * 不加入任何会因网络数据更新而清空、替换的 MUtil 区域容器。
      */
     private void renderStaticDividers(GuiGraphics graphics) {
-        graphics.fill(4, TITLE_H, Math.max(4, this.width - 4), TITLE_H + 1,
-            STATIC_DIVIDER);
+        UiPaint.hairline(graphics, 4, TITLE_H, Math.max(1, this.width - 8), staticDividerColor());
 
         int dividerBottom = Math.max(TITLE_H + 2, this.height - STATUS_BAR_H - 2);
-        graphics.fill(leftX + leftW, TITLE_H + 2, leftX + leftW + 1, dividerBottom,
-            STATIC_DIVIDER);
-        graphics.fill(centerX + centerW, TITLE_H + 2, centerX + centerW + 1, dividerBottom,
-            STATIC_DIVIDER);
+        UiPaint.dividerV(graphics, leftX + leftW, TITLE_H + 2,
+            Math.max(1, dividerBottom - (TITLE_H + 2)));
+        // 中栏隐藏（已部署战局内）时没有列间分隔线可画。
+        if (centerW > 0) {
+            UiPaint.dividerV(graphics, centerX + centerW, TITLE_H + 2,
+                Math.max(1, dividerBottom - (TITLE_H + 2)));
+            // 职业选择区（上）与部署点区（下）之间的横向分割线，样式同其它板块分隔线
+            int classBottom = classAreaY + classAreaH;
+            int regionDividerY = classBottom + Math.max(0, (deployAreaY - classBottom) / 2);
+            regionDividerY = Math.max(TITLE_H + 2, Math.min(dividerBottom - 1, regionDividerY));
+            UiPaint.hairline(graphics, centerX + 1, regionDividerY,
+                Math.max(1, centerW - 2), staticDividerColor());
+        }
+
     }
 
     private static void resetGuiRenderState(GuiGraphics graphics) {
@@ -2072,14 +3572,11 @@ public class UnifiedDeployScreen extends MutilScreen {
     }
 
     @Override
-    protected void renderAfterMutil(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
+    protected void renderAfterMenu(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
         computeRegions();
 
         // 在 GUI 元素树绘制完成后解析悬停目标，此时 EspButton.hovered 已被更新。
         updatePreviewTarget(mouseX, mouseY);
-        if (activeGovernance() != null && !"IDLE".equals(activeGovernance().state)) {
-            graphics.renderOutline(mapX, mapY, mapW, mapH, 0x805B6260);
-        }
 
         renderClassTooltip(graphics, mouseX, mouseY);
         renderVariantPopup(graphics, mouseX, mouseY);
@@ -2099,7 +3596,6 @@ public class UnifiedDeployScreen extends MutilScreen {
             partialTick
         );
         resetGuiRenderState(graphics);
-        renderMapViewportBorder(graphics, viewportH);
     }
 
     /**
@@ -2136,7 +3632,6 @@ public class UnifiedDeployScreen extends MutilScreen {
             graphics.disableScissor();
         }
         resetGuiRenderState(graphics);
-        renderMapViewportBorder(graphics, viewportH);
     }
 
     private int mapViewportHeight() {
@@ -2144,11 +3639,8 @@ public class UnifiedDeployScreen extends MutilScreen {
     }
 
     private void renderMapViewportBackground(GuiGraphics graphics, int viewportH) {
-        graphics.fill(mapX, mapY, mapX + mapW, mapY + viewportH, PANEL_MAP_FOOTER_BG);
-    }
-
-    private void renderMapViewportBorder(GuiGraphics graphics, int viewportH) {
-        graphics.renderOutline(mapX, mapY, mapW, viewportH, 0xFF5B6260);
+        UiPaint.roundRect(graphics, mapX, mapY, mapW, viewportH,
+            UiTheme.RADIUS_CARD, panelMapFooterBgColor());
     }
 
     /**
@@ -2356,15 +3848,14 @@ public class UnifiedDeployScreen extends MutilScreen {
                 py = this.height - STATUS_BAR_H - ph - 2;
             }
 
-            graphics.fill(px, py, px + pw, py + ph, 0xDD111122);
-            graphics.renderOutline(px, py, pw, ph, 0xFF555577);
+            UiPaint.card(graphics, px, py, pw, ph);
 
             int logicalWidth = Math.max(8, (int) ((pw - 7) / TOOLTIP_TEXT_SCALE));
             int ty = py + 3;
             for (String line : lines) {
                 drawScaledString(graphics,
-                    EspetroMutilWidgets.trimToWidth(line, logicalWidth),
-                    px + 4, ty, BTN_TEXT, TOOLTIP_TEXT_SCALE);
+                    EspetroAuiWidgets.trimToWidth(line, logicalWidth),
+                    px + 4, ty, btnTextColor(), TOOLTIP_TEXT_SCALE);
                 ty += lineH;
             }
             break;
@@ -2377,19 +3868,20 @@ public class UnifiedDeployScreen extends MutilScreen {
         List<UnifiedDeployScreenPacket.VariantInfo> variants = cls.variants;
         int visible = Math.min(VARIANT_MAX_VISIBLE, variants.size());
 
-        graphics.fill(variantPopupX, variantPopupY,
-            variantPopupX + VARIANT_POPUP_W, variantPopupY + variantPopupH, 0xF0111418);
-        graphics.renderOutline(variantPopupX, variantPopupY,
-            VARIANT_POPUP_W, variantPopupH, 0xFFE8B85C);
-        graphics.drawString(this.font, Component.literal("§6§l" + cls.name + " §7装备变体"),
-            variantPopupX + 6, variantPopupY + 5, BTN_TEXT, false);
+        UiPaint.card(graphics, variantPopupX, variantPopupY,
+            VARIANT_POPUP_W, variantPopupH);
+        UiPaint.text(graphics, cls.name + " / 装备变体",
+            variantPopupX + 6, variantPopupY + 5, UiTheme.TEXT);
+        UiPaint.hairline(graphics, variantPopupX + 4, variantPopupY + VARIANT_HEADER_H - 2,
+            VARIANT_POPUP_W - 8, UiTheme.HAIRLINE_STRONG);
 
         int closeX = variantPopupX + VARIANT_POPUP_W - 16;
         int closeY = variantPopupY + 2;
         boolean closeHovered = inside(mouseX, mouseY, closeX, closeY, 13, 13);
-        graphics.fill(closeX, closeY, closeX + 13, closeY + 13,
-            closeHovered ? 0xFFD05A5A : 0xFF553535);
-        graphics.drawCenteredString(this.font, Component.literal("§fX"), closeX + 6, closeY + 2, BTN_TEXT);
+        UiPaint.roundRect(graphics, closeX, closeY, 13, 13, UiTheme.RADIUS_INNER,
+            closeHovered ? UiTheme.CONTROL_HOVER : UiTheme.CONTROL_NORMAL);
+        UiPaint.textCentered(graphics, "X", closeX, closeY + 2, 13,
+            UiTheme.TEXT, 1f, false);
 
         for (int row = 0; row < visible; row++) {
             int variantIndex = variantPopupScroll + row;
@@ -2405,34 +3897,33 @@ public class UnifiedDeployScreen extends MutilScreen {
             boolean parentFull = isClassButtonDisabled(cls);
             boolean full = parentFull || (cls.strictCount && count >= variant.maxPlayers);
             boolean hovered = inside(mouseX, mouseY, rowX, rowY, rowW, VARIANT_ROW_H - 1);
-            int fill = full ? 0xD02B2025 : hovered ? 0xE0435145 : 0xD01B1E20;
-            graphics.fill(rowX, rowY, rowX + rowW, rowY + VARIANT_ROW_H - 1, fill);
-            graphics.renderOutline(rowX, rowY, rowW, VARIANT_ROW_H - 1,
-                hovered && !full ? 0xFFB7C9B8 : 0x8059605E);
+            int fill = full ? UiTheme.alpha(UiTheme.ATTACK, 0.18f)
+                : hovered ? UiTheme.CONTROL_HOVER : UiTheme.CONTROL_NORMAL;
+            // 需求 6：变体行同属按钮且原本就有底色 → 只去掉边框（悬停仍有底色高亮）
+            UiPaint.roundRect(graphics, rowX, rowY, rowW, VARIANT_ROW_H - 1, UiTheme.RADIUS_INNER, fill);
 
             String countText;
             if (cls.strictCount) {
-                countText = (full ? "§c" : "§a") + "[" + count + "/" + variant.maxPlayers + "]";
+                countText = "[" + count + "/" + variant.maxPlayers + "]";
             } else {
                 // 非严格模式：仅显示当前选择人数，不显示变体上限
-                countText = "§a" + count + "人";
+                countText = count + "人";
             }
-            graphics.drawString(this.font, Component.literal((full ? "§8" : "§f") + variant.name),
-                rowX + 5, rowY + 4, BTN_TEXT, false);
-            int countW = this.font.width(EspetroMutilWidgets.stripFormatting(countText));
-            graphics.drawString(this.font, Component.literal(countText),
-                rowX + rowW - countW - 5, rowY + 4, BTN_TEXT, false);
+            UiPaint.text(graphics, variant.name, rowX + 5, rowY + 4,
+                full ? UiTheme.TEXT_DISABLED : UiTheme.TEXT);
+            int countW = this.font.width(EspetroAuiWidgets.stripFormatting(countText));
+            UiPaint.text(graphics, countText, rowX + rowW - countW - 5, rowY + 4,
+                full ? UiTheme.NEGATIVE : UiTheme.POSITIVE);
             if (variant.description != null && !variant.description.isBlank()) {
-                graphics.drawString(this.font, Component.literal("§7" +
-                    EspetroMutilWidgets.trimToWidth(variant.description, rowW - 10)),
-                    rowX + 5, rowY + 16, EspetroMutilWidgets.DIM, false);
+                UiPaint.text(graphics, EspetroAuiWidgets.trimToWidth(variant.description, rowW - 10),
+                    rowX + 5, rowY + 16, UiTheme.TEXT_SECOND);
             }
         }
 
         if (variants.size() > VARIANT_MAX_VISIBLE) {
-            graphics.drawString(this.font, Component.literal("§8滚轮浏览"),
+            UiPaint.text(graphics, "滚轮浏览",
                 variantPopupX + VARIANT_POPUP_W - 49, variantPopupY + variantPopupH - 10,
-                EspetroMutilWidgets.DIM, false);
+                UiTheme.TEXT_THIRD);
         }
     }
 
@@ -2445,6 +3936,18 @@ public class UnifiedDeployScreen extends MutilScreen {
         }
         lastMouseX = (int) mx;
         lastMouseY = (int) my;
+        // 点击内联名称输入框以外的地方：取消它的输入焦点
+        if (squadInlineNameField != null && squadInlineNameField.isTyping()
+            && !inside((int) mx, (int) my,
+                squadInlineNameField.getX(), squadInlineNameField.getY(),
+                squadInlineNameField.getWidth(), squadInlineNameField.getHeight())) {
+            squadInlineNameField.setTyping(false);
+            squadInlineNameTyping = false;
+        }
+        // 班组确认框打开时：交由弹层容器（含全屏遮罩）处理，避免穿透到下层按钮。
+        if (hasSquadConfirm()) {
+            return super.mouseClicked(mx, my, button);
+        }
         if (hasVariantPopup()) {
             if (button == 0 && handleVariantPopupClick((int) mx, (int) my)) {
                 return true;
@@ -2458,6 +3961,10 @@ public class UnifiedDeployScreen extends MutilScreen {
 
     @Override
     public boolean mouseScrolled(double mx, double my, double delta) {
+        // 弹层打开时吞掉滚轮，避免滚动下层列表
+        if (hasSquadConfirm()) {
+            return true;
+        }
         if (hasVariantPopup() && inside((int) mx, (int) my,
             variantPopupX, variantPopupY, VARIANT_POPUP_W, variantPopupH)) {
             int maxScroll = Math.max(0,
@@ -2471,6 +3978,27 @@ public class UnifiedDeployScreen extends MutilScreen {
 
     @Override
     public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
+        // 内联「小队名称」输入框聚焦时：键盘只喂给输入框，避免触发其它快捷键
+        // （字符输入走 charTyped，与 keyPressed 的返回值无关）。
+        SquadInlineNameField inline = squadInlineNameField;
+        if (inline != null && inline.isTyping()) {
+            if (keyCode == GLFW.GLFW_KEY_ESCAPE) {
+                inline.setTyping(false);
+                squadInlineNameTyping = false;
+                return true;   // 先取消输入焦点，不关闭界面
+            }
+            inline.onKeyPress(keyCode, scanCode, modifiers);
+            return true;   // 吞掉其余按键（含 C / B / T 等快捷键）
+        }
+        // 弹层优先级：队伍类型上拉菜单 → 确认框 → 成员右键菜单 → 职业变体弹窗
+        if (keyCode == GLFW.GLFW_KEY_ESCAPE && hasSquadCategoryPopup()) {
+            closeSquadCategoryPopup();
+            return true;
+        }
+        if (keyCode == GLFW.GLFW_KEY_ESCAPE && hasSquadConfirm()) {
+            closeSquadConfirm();
+            return true;
+        }
         if (keyCode == GLFW.GLFW_KEY_ESCAPE && hasFireteamContextMenu()) {
             closeFireteamContextMenu();
             return true;
@@ -2491,7 +4019,6 @@ public class UnifiedDeployScreen extends MutilScreen {
     }
 
     // ==================== 业务逻辑 ====================
-
 
     /** 是否已加入班组（mySquadId 有效）。 */
     private boolean inSquad() {
@@ -2530,13 +4057,17 @@ public class UnifiedDeployScreen extends MutilScreen {
     /** 客户端侧选职拒绝原因（与服务端规则对齐的展示层）。 */
     private String resolveClassDenialMessage(UnifiedDeployScreenPacket.ClassInfo cls) {
         if (!isClassSelectionLocationAllowed()) {
-            return "只能在选择部署点时、原部署点附近或己方 Radio 轮盘中选择职业。";
+            return "只能在选择部署点时、主基地附近或己方 Radio 轮盘中选择职业。";
         }
         if (getClassSwitchCooldownRemaining() > 0) {
             return "职业切换冷却中，还需等待 " + getClassSwitchCooldownRemaining() + " 秒。";
         }
         if (!inSquad()) {
             return "请先加入班组小队后再选择职业。";
+        }
+        // 装备完全解锁模式：不再报人数类拒绝原因
+        if (freeUnlockMode) {
+            return "";
         }
         if (cls.teammatesNeed > 0 && mySquadSize() < cls.teammatesNeed) {
             return "小队达到 " + cls.teammatesNeed + " 人后才能选择该职业。";
@@ -2586,8 +4117,30 @@ public class UnifiedDeployScreen extends MutilScreen {
     /**
      * 未入队全部禁用；入队后 team_count 看小队满，非 team_count 看编制总限 + max_per_squad。
      */
-    private boolean isClassButtonDisabled(UnifiedDeployScreenPacket.ClassInfo cls) {
-        if (!isClassSelectionLocationAllowed()) {
+    /** 服务端下发的"装备完全解锁模式"状态（包级字段）。 */
+    private static volatile boolean freeUnlockMode;
+
+    /**
+     * 更新完全解锁状态。
+     *
+     * @return 状态是否发生变化（变化时调用方应刷新职业按钮）
+     */
+    public static boolean applyFreeUnlock(boolean value) {
+        if (freeUnlockMode == value) return false;
+        freeUnlockMode = value;
+        return true;
+    }
+
+    public static boolean isFreeUnlockMode() {
+        return freeUnlockMode;
+    }
+
+    /** 开关状态变化后刷新职业格子（置灰/提示文案）。 */
+    public void refreshForFreeUnlock() {
+        refreshClassButtons();
+    }
+
+    private boolean isClassButtonDisabled(UnifiedDeployScreenPacket.ClassInfo cls) {        if (!isClassSelectionLocationAllowed()) {
             return true;
         }
         if (getClassSwitchCooldownRemaining() > 0) {
@@ -2595,6 +4148,10 @@ public class UnifiedDeployScreen extends MutilScreen {
         }
         if (!inSquad()) {
             return true;
+        }
+        // 装备完全解锁模式：人数类限制一律放行（位置/冷却/入队仍如上保留）
+        if (freeUnlockMode) {
+            return false;
         }
         if (cls.teammatesNeed > 0 && mySquadSize() < cls.teammatesNeed) {
             return true;
@@ -2683,6 +4240,11 @@ public class UnifiedDeployScreen extends MutilScreen {
         return false;
     }
 
+    /** 该职业是否就是本地玩家当前选中的职业（选中的职业永远黄底、不灰显）。 */
+    private boolean isSelectedClass(UnifiedDeployScreenPacket.ClassInfo cls) {
+        return cls != null && selectedClassId != null && selectedClassId.equals(cls.classId);
+    }
+
     private void refreshClassButtons() {
         boolean coolingDown = getClassSwitchCooldownRemaining() > 0;
         for (EspButton btn : classButtons) {
@@ -2706,22 +4268,26 @@ public class UnifiedDeployScreen extends MutilScreen {
             btn.setEnabled(!disabled);
             final int classIndex = clsIdx;
             btn.setDisabledAction(() -> selectClass(classIndex));
+            // 选中状态与"能不能点"解耦：被选中的职业永远黄底、永远不灰显。
+            btn.setSelected(isSelected, classBgSelectedColor());
             if (disabled) {
                 if (isSelected) {
                     btn.setDisabledStyle(
-                        CLASS_BG_SELECTED,
-                        0xFFE8B85C,
-                        0xFFFFFFFF);
+                        classBgSelectedColor(),
+                        UiTheme.GOLD_LINE,
+                        UiTheme.TEXT);
                 } else {
+                    // 需求 3-4：禁用态同样不铺底色（只靠图标压暗 + 文字变色）
                     btn.setDisabledStyle(
-                        coolingDown ? BTN_BG_DISABLED : CLASS_BG_UNAVAILABLE,
-                        coolingDown ? 0x60383848 : CLASS_BORDER_UNAVAILABLE,
-                        coolingDown ? 0xFF777777 : 0xFFFF9A9A);
+                        UiTheme.TRANSPARENT,
+                        coolingDown ? UiTheme.TEXT_DISABLED : classBorderUnavailableColor(),
+                        coolingDown ? UiTheme.TEXT_THIRD : UiTheme.ATTACK);
                 }
             } else {
                 btn.setDisabledAction(null);
-                btn.normalColor = isSelected ? CLASS_BG_SELECTED : BTN_BG_NORMAL;
-                btn.hoverColor = BTN_BG_HOVER;
+                // 统一黑底 + 无边框（悬停高亮 / 选中黄底覆盖黑底）。
+                // 这里必须跟随刷新，否则会覆盖构建时的透明态、重新铺上黑底。
+                btn.setTransparentIdle();
             }
         }
     }
@@ -2734,8 +4300,8 @@ public class UnifiedDeployScreen extends MutilScreen {
     private String buildClassTitle() {
         int remaining = getClassSwitchCooldownRemaining();
         return remaining > 0
-            ? "\u00a76职业选择 \u00a77| \u00a7e" + remaining + "秒后可更换"
-            : "\u00a76职业选择";
+            ? "职业选择 \u00a77| \u00a7e" + remaining + "秒后可更换"
+            : "职业选择";
     }
 
     private void refreshClassSwitchCooldown() {
@@ -2902,6 +4468,7 @@ public class UnifiedDeployScreen extends MutilScreen {
         boolean sameFireteam = self.fireteam == target.fireteam;
         final UUID targetId = target.uuid;
         final byte targetFt = target.fireteam;
+        final String targetName = target.playerName == null ? "" : target.playerName;
         boolean isSelf = targetId.equals(self.uuid);
 
         List<FireteamContextEntry> entries = new ArrayList<>();
@@ -2932,6 +4499,15 @@ public class UnifiedDeployScreen extends MutilScreen {
                         closeFireteamContextMenu();
                     }));
             }
+            // 踢出小队：队长对非自己成员可用；二次确认后执行（被踢者职业与装备会被清空）
+            entries.add(new FireteamContextEntry("\u00a7c踢出小队", true, () -> {
+                closeFireteamContextMenu();
+                openSquadConfirm("踢出队员",
+                    "确定将 " + targetName + " 踢出小队？其职业与装备会被清空。",
+                    () -> NetworkManager.sendMatchStatsAction(
+                        org.espetro.network.MatchStatsActionPacket.Action.KICK_FROM_SQUAD,
+                        targetId));
+            }));
         }
         // 小队长只交接“队长”；不能通过火力组菜单卸掉 A 组长身份。
         if (!selfIsSquadLeader && selfIsFtLeader && sameFireteam && !isSelf) {
@@ -2962,9 +4538,9 @@ public class UnifiedDeployScreen extends MutilScreen {
                 return true;
             }
         });
-        fireteamContextRoot.addChild(new GuiRect(
+        fireteamContextRoot.addChild(EspetroAuiWidgets.panel(
             fireteamContextX, fireteamContextY,
-            FIRETEAM_CONTEXT_W, menuH, 0xF0111418));
+            FIRETEAM_CONTEXT_W, menuH));
         int y = fireteamContextY + 3;
         for (FireteamContextEntry entry : fireteamContextEntries) {
             EspButton button = new EspButton(
@@ -2974,6 +4550,7 @@ public class UnifiedDeployScreen extends MutilScreen {
             button.setEnabled(entry.enabled);
             button.setTextScale(SQUAD_MEMBER_TEXT_SCALE);
             button.setCenteredText(false);
+            button.setPlainBlack();   // 需求 6：原"有边框、没底色" → 无边框 + 黑半透底
             fireteamContextRoot.addChild(button);
             y += FIRETEAM_CONTEXT_ROW_H;
         }
@@ -2990,9 +4567,9 @@ public class UnifiedDeployScreen extends MutilScreen {
 
     @Override
     public void onClose() {
-        if (!isDeploymentSelectionRequired()) {
-            super.onClose();
-        }
+        // 不再硬锁：未选完部署点时也允许 Esc 关闭面板，
+        // 避免"除了放炮什么也干不了、还退不出去"的死锁体验。
+        super.onClose();
     }
 
     private boolean isDeploymentSelectionRequired() {

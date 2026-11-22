@@ -1,6 +1,7 @@
 package org.espetro.bastion;
 
 import com.mojang.brigadier.CommandDispatcher;
+import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
@@ -47,6 +48,14 @@ public class BastionCommand {
                     if (player == null) return 0;
                     return respawnAtDeployPoint(player);
                 })
+                .then(Commands.argument("index", IntegerArgumentType.integer(1))
+                    .executes(context -> {
+                        ServerPlayer player = context.getSource().getPlayer();
+                        if (player == null) return 0;
+                        return respawnAtDeployPoint(player,
+                            IntegerArgumentType.getInteger(context, "index") - 1);
+                    })
+                )
             )
             .then(Commands.literal("list")
                 .requires(source -> source.hasPermission(0))
@@ -63,7 +72,7 @@ public class BastionCommand {
                     player.sendSystemMessage(Component.literal("§6=== 兵站命令帮助 ==="));
                     player.sendSystemMessage(Component.literal("§e/bastion list §7- 查看可用兵站列表"));
                     player.sendSystemMessage(Component.literal("§e/bastion select <id> §7- 在指定兵站或队伍集结点复活"));
-                    player.sendSystemMessage(Component.literal("§e/bastion deploy §7- 在原部署点复活"));
+                    player.sendSystemMessage(Component.literal("§e/bastion deploy §7- 在主基地复活"));
                     player.sendSystemMessage(Component.literal("§7(点击聊天中的链接可直接选择)"));
                     return 1;
                 })
@@ -109,6 +118,28 @@ public class BastionCommand {
      * 在原部署点复活
      */
     private static int respawnAtDeployPoint(ServerPlayer player) {
+        return respawnAtDeployPoint(player, -1);
+    }
+
+    /**
+     * 在指定主基地重生点复活（index &lt; 0 表示沿用玩家已保存的部署点）。
+     */
+    private static int respawnAtDeployPoint(ServerPlayer player, int index) {
+        if (index >= 0) {
+            String team = ClassCountManager.getInstance().getPlayerTeam(player.getUUID());
+            java.util.List<org.espetro.team.SpawnPointConfig.SpawnPoint> mains =
+                org.espetro.team.SpawnPointConfig.getSpawnPoints(team);
+            if (index >= mains.size()) {
+                player.sendSystemMessage(Component.literal("§c没有第 " + (index + 1) + " 个主基地！"));
+                return 0;
+            }
+            org.espetro.team.SpawnPointConfig.SpawnPoint sp = mains.get(index);
+            net.minecraft.server.level.ServerLevel level =
+                org.espetro.mapconfig.BattlefieldContext.requireBattlefield(player.server);
+            net.minecraft.core.BlockPos pos = net.minecraft.core.BlockPos.containing(
+                sp.x, sp.y, sp.z);
+            BastionManager.getInstance().savePlayerDeployPoint(player, pos, level);
+        }
         // 检查是否在对战阶段或部署阶段（战局中加入允许部署阶段）
         org.espetro.team.GamePhase phase = GameStateManager.getInstance().getCurrentPhase();
         if (phase != org.espetro.team.GamePhase.BATTLE
@@ -124,18 +155,18 @@ public class BastionCommand {
             return 0;
         }
 
-        // 检查是否有原部署点记录
+        // 检查是否有主基地记录
         if (!BastionManager.getInstance().isWaitingForBastion(player.getUUID())) {
             player.sendSystemMessage(Component.literal("§c你不在等待复活状态！"));
             return 0;
         }
         BastionManager.DeployPoint deployPoint = BastionManager.getInstance().getPlayerDeployPoint(player.getUUID());
         if (deployPoint == null) {
-            player.sendSystemMessage(Component.literal("§c无法找到原部署点！"));
+            player.sendSystemMessage(Component.literal("§c无法找到主基地！"));
             return 0;
         }
 
-        // 执行原部署点复活
+        // 执行主基地复活
         if (BastionManager.getInstance().respawnAtDeployPoint(
             org.espetro.mapconfig.BattlefieldContext.requireBattlefield(player.server), player)) {
             // 战局中加入：部署完成后触发职业选择

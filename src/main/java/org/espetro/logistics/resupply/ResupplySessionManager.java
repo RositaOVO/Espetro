@@ -4,13 +4,17 @@ import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.Tag;
 import net.minecraft.nbt.TagParser;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.world.entity.decoration.ItemFrame;
+import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.phys.AABB;
 import net.minecraftforge.network.PacketDistributor;
 import org.espetro.Espetro;
 import org.espetro.bastion.BastionData;
@@ -48,6 +52,14 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class ResupplySessionManager {
     private static final int MAX_ITEMS = 64;
     private static final int RESULT_CACHE_SIZE = 64;
+    /**
+     * Sentinel slot id for the offhand.  The player's offhand must be scanned by
+     * every "how much of this item do I already own" check, otherwise a player
+     * can park the supplied item in the offhand to keep claiming past the cap.
+     */
+    private static final int OFFHAND_SLOT = -1;
+    /** "No such slot" sentinel returned by {@link #findSpentSlot}. */
+    private static final int NO_SLOT = -2;
     private static final int RATE_LIMIT_CACHE_SIZE = 8192;
     private static final long SESSION_TIMEOUT_TICKS = 20L * 30L;
     private static final AtomicLong NEXT_CATALOGUE_REVISION = new AtomicLong(1L);
@@ -283,7 +295,13 @@ public final class ResupplySessionManager {
         int wanted = org.espetro.logistics.AmmoResupplyPolicy.grantCount(
             current, spec.max, spec.count);
         int grant = Math.min(wanted, insertionCapacity(player, spec.template));
-        if (grant <= 0) return TransactionResult.fail(current >= spec.max ? "已达到补给上限" : "背包没有空间");
+        if (grant <= 0) {
+            int spent = spec.magazineIdentity == null ? findSpentSlot(player, spec) : NO_SLOT;
+            if (spent != NO_SLOT && current >= spec.max) {
+                return replaceSpent(player, source, spec, spent);
+            }
+            return TransactionResult.fail(current >= spec.max ? "已达到补给上限" : "背包没有空间");
+        }
 
         List<ItemStack> before = snapshotInventory(player);
         if (!source.consume(spec.ammoCost)) return TransactionResult.fail("来源弹药刚刚发生变化");
@@ -307,35 +325,99 @@ public final class ResupplySessionManager {
         int full = matching.stream().filter(MagazineSlot::full)
             .mapToInt(slot -> slot.stack.getCount()).sum();
         if (full >= spec.max) return TransactionResult.fail("满弹匣已达到上限");
-        ItemStack replacement = compat.createFull(spec.template);
-        if (replacement.isEmpty()) return TransactionResult.fail("无法创建该弹匣");
+        // 补给弹匣 = 把背包里已有的半空弹匣填满，而不是「发一个新弹匣再吃掉旧的」：
+        // 旧做法会连弹匣里剩余的子弹一起丢掉，玩家每次补充都要丢一次。
         MagazineSlot partial = matching.stream().filter(slot -> !slot.full)
             .min(Comparator.comparingInt(MagazineSlot::rounds)
                 .thenComparingInt(MagazineSlot::slot)).orElse(null);
-        if (partial == null && insertionCapacity(player, replacement) < 1) {
-            return TransactionResult.fail("背包没有空间");
+        if (partial == null) {
+            // 没有可填充的弹匣：退回"直接发一个满弹匣"。
+            // 打空后的弹匣可能还嵌在枪里（TaCZMag_StoredMagazine）、被拆走或掉在地上，
+            // 背包里没有任何可填对象时如果直接拒绝，玩家就彻底补不了弹。
+            ItemStack replacement = compat.createFull(spec.template);
+            if (replacement.isEmpty()) return TransactionResult.fail("无法创建该弹匣");
+            if (insertionCapacity(player, replacement) < 1) {
+                return TransactionResult.fail("背包没有空间（枪内的空弹匣请先取出，或清空一个背包格）");
+            }
+            List<ItemStack> beforeAdd = snapshotInventory(player);
+            if (!source.consume(spec.ammoCost)) return TransactionResult.fail("来源弹药刚刚发生变化");
+            ItemStack inserted = replacement.copy();
+            boolean added = player.getInventory().add(inserted) && inserted.isEmpty();
+            if (!added) {
+                restoreInventory(player, beforeAdd);
+                source.refund(spec.ammoCost);
+                return TransactionResult.fail("背包变化导致弹匣事务回滚");
+            }
+            finish(player, source);
+            return TransactionResult.ok("已领取 1 个满弹匣，消耗 " + spec.ammoCost + " 弹药");
         }
 
+        int capacity = spec.magazineIdentity.capacity();
+        if (partial.stored) {
+            // 枪内弹匣走独立事务（它自己扣一次弹药并写回枪械 NBT），
+            // 这里必须先分流，否则会在下面先扣一次、再在事务里扣第二次。
+            return transactStoredMagazine(player, source, spec, partial, capacity);
+        }
         List<ItemStack> before = snapshotInventory(player);
         if (!source.consume(spec.ammoCost)) return TransactionResult.fail("来源弹药刚刚发生变化");
-        boolean committed;
-        if (partial != null && partial.stack.getCount() == 1) {
-            player.getInventory().setItem(partial.slot, replacement.copy());
-            committed = true;
+        ItemStack target = partial.slot == OFFHAND_SLOT
+            ? player.getInventory().offhand.get(0)
+            : player.getInventory().getItem(partial.slot);
+        // TaCZ Magazines stacks identical magazines in one slot.  Filling the whole
+        // stack would hand the player several magazines for a single supply unit, so
+        // one magazine is split off and filled on its own.
+        boolean split = target.getCount() > 1;
+        ItemStack filled;
+        if (split) {
+            filled = target.copy();
+            filled.setCount(1);
+            target.shrink(1);
         } else {
-            if (partial != null) player.getInventory().getItem(partial.slot).shrink(1);
-            ItemStack inserted = replacement.copy();
-            committed = player.getInventory().add(inserted) && inserted.isEmpty();
+            filled = target;
         }
-        if (!committed) {
+        if (!compat.bindAmmo(filled, spec.magazineIdentity.ammoId())
+            || !compat.setAmmoCount(filled, capacity)) {
             restoreInventory(player, before);
             source.refund(spec.ammoCost);
-            return TransactionResult.fail("背包变化导致弹匣事务回滚");
+            return TransactionResult.fail("无法填充该弹匣");
+        }
+        if (split) {
+            ItemStack returned = filled.copy();
+            boolean added = player.getInventory().add(returned) && returned.isEmpty();
+            if (!added) {
+                restoreInventory(player, before);
+                source.refund(spec.ammoCost);
+                return TransactionResult.fail("背包没有空间放下填好的弹匣");
+            }
         }
         finish(player, source);
-        return TransactionResult.ok(partial == null
-            ? "已领取1个满弹匣，消耗 " + spec.ammoCost + " 弹药"
-            : "已丢弃最低余弹并替换为满弹匣，消耗 " + spec.ammoCost + " 弹药");
+        return TransactionResult.ok("已填满 1 个弹匣（" + partial.rounds + " → " + capacity
+            + " 发），消耗 " + spec.ammoCost + " 弹药");
+    }
+
+    /** 填满枪械 NBT 里的弹匣并写回。 */
+    private static TransactionResult transactStoredMagazine(ServerPlayer player,
+                                                             ResolvedSource source, EntrySpec spec,
+                                                             MagazineSlot partial, int capacity) {
+        MagazineCompat compat = MagazineCompatProvider.get();
+        ItemStack gun = partial.slot == OFFHAND_SLOT
+            ? player.getInventory().offhand.get(0)
+            : player.getInventory().getItem(partial.slot);
+        if (gun.isEmpty()) return TransactionResult.fail("枪械已不在背包中");
+        ItemStack filled = partial.stack.copy();
+        if (filled.isEmpty()
+            || !compat.bindAmmo(filled, spec.magazineIdentity.ammoId())
+            || !compat.setAmmoCount(filled, capacity)) {
+            return TransactionResult.fail("无法填充该弹匣");
+        }
+        if (!source.consume(spec.ammoCost)) return TransactionResult.fail("来源弹药刚刚发生变化");
+        if (!compat.setStoredMagazine(gun, filled)) {
+            source.refund(spec.ammoCost);
+            return TransactionResult.fail("无法写回枪内弹匣");
+        }
+        finish(player, source);
+        return TransactionResult.ok("已填满枪内弹匣（" + partial.rounds + " → " + capacity
+            + " 发），消耗 " + spec.ammoCost + " 弹药");
     }
 
     private static void finish(ServerPlayer player, ResolvedSource source) {
@@ -352,7 +434,8 @@ public final class ResupplySessionManager {
             : countFullMagazines(player, spec, MagazineCompatProvider.get());
         String reason = spec.unavailableReason;
         boolean selectable = reason.isEmpty();
-        if (selectable && current >= spec.max) {
+        boolean canReplace = spec.magazineIdentity == null && findSpentSlot(player, spec) != NO_SLOT;
+        if (selectable && current >= spec.max && !canReplace) {
             selectable = false;
             reason = spec.magazineIdentity == null ? "已达到上限" : "满弹匣已达到上限";
         }
@@ -360,12 +443,13 @@ public final class ResupplySessionManager {
             selectable = false;
             reason = "来源弹药不足";
         }
-        if (selectable) {
+        if (selectable && current < spec.max) {
             if (spec.magazineIdentity == null && insertionCapacity(player, spec.template) <= 0) {
                 selectable = false;
                 reason = "背包没有空间";
             } else if (spec.magazineIdentity != null
-                && !hasReplaceableMagazineOrSpace(player, spec, MagazineCompatProvider.get())) {
+                && !hasFillableMagazine(player, spec, MagazineCompatProvider.get())
+                && !canReceiveNewMagazine(player, spec, MagazineCompatProvider.get())) {
                 selectable = false;
                 reason = "背包没有空间";
             }
@@ -377,14 +461,78 @@ public final class ResupplySessionManager {
     private static int countNormal(ServerPlayer player, EntrySpec spec) {
         int count = 0;
         for (ItemStack stack : player.getInventory().items) {
-            if (stack.isEmpty()) continue;
-            if (ResupplyItemIdentity.matchesNormal(spec.exactTag,
-                stack.is(spec.template.getItem()),
-                ItemStack.isSameItemSameTags(stack, spec.template))) {
-                count += stack.getCount();
-            }
+            if (matchesCountedNormal(stack, spec)) count += stack.getCount();
+        }
+        ItemStack offhand = player.getInventory().offhand.get(0);
+        if (matchesCountedNormal(offhand, spec)) count += offhand.getCount();
+        if (taczGunId(spec.template) != null) count += countLoose(player, spec);
+        return count;
+    }
+
+    /**
+     * Counts matching stacks that the player has dropped nearby (on the ground or in an
+     * item frame). Only gun entries use this: guns are the only capped entry a player can
+     * shed without losing it, which used to reset the cap and allow unlimited farming.
+     */
+    private static int countLoose(ServerPlayer player, EntrySpec spec) {
+        int count = 0;
+        AABB area = player.getBoundingBox().inflate(64.0D);
+        for (ItemEntity entity : player.level().getEntitiesOfClass(ItemEntity.class, area)) {
+            if (matchesCountedNormal(entity.getItem(), spec)) count += entity.getItem().getCount();
+        }
+        for (ItemFrame frame : player.level().getEntitiesOfClass(ItemFrame.class, area)) {
+            if (matchesCountedNormal(frame.getItem(), spec)) count += frame.getItem().getCount();
         }
         return count;
+    }
+
+    private static boolean matchesCountedNormal(ItemStack stack, EntrySpec spec) {
+        if (stack.isEmpty() || !stack.is(spec.template.getItem())) return false;
+        String gun = taczGunId(stack);
+        if (gun != null && gun.equals(taczGunId(spec.template))) return true;
+        return ResupplyItemIdentity.matchesNormal(spec.exactTag, true,
+            ItemStack.isSameItemSameTags(stack, spec.template));
+    }
+
+    /**
+     * The TaCZ gun id baked into an item stack, or null for non-gun stacks. Two stacks of
+     * the same gun differ by ammo count / barrel state / attachments, so counting guns by
+     * exact NBT equality reports a fired launcher as "not owned".
+     */
+    @Nullable
+    private static String taczGunId(ItemStack stack) {
+        if (stack.isEmpty()) return null;
+        ResourceLocation key = BuiltInRegistries.ITEM.getKey(stack.getItem());
+        if (key == null || !"tacz".equals(key.getNamespace())) return null;
+        CompoundTag tag = stack.getTag();
+        if (tag == null || !tag.contains("GunId", Tag.TAG_STRING)) return null;
+        return tag.getString("GunId");
+    }
+
+    private static int findSpentSlot(ServerPlayer player, EntrySpec spec) {
+        for (int i = 0; i < player.getInventory().items.size(); i++) {
+            if (isSpentGun(player.getInventory().items.get(i), spec)) return i;
+        }
+        return isSpentGun(player.getInventory().offhand.get(0), spec) ? OFFHAND_SLOT : NO_SLOT;
+    }
+
+    private static boolean isSpentGun(ItemStack stack, EntrySpec spec) {
+        if (!matchesCountedNormal(stack, spec)) return false;
+        if (ItemStack.isSameItemSameTags(stack, spec.template)) return false;
+        CompoundTag tag = stack.getTag();
+        return tag != null && tag.getInt("GunCurrentAmmoCount") <= 0 && !tag.getBoolean("HasBulletInBarrel");
+    }
+
+    private static TransactionResult replaceSpent(ServerPlayer player, ResolvedSource source,
+                                                  EntrySpec spec, int slot) {
+        if (!source.consume(spec.ammoCost)) return TransactionResult.fail("来源弹药刚刚发生变化");
+        ItemStack fresh = spec.template.copy();
+        fresh.setCount(1);
+        if (slot == OFFHAND_SLOT) player.getInventory().offhand.set(0, fresh);
+        else player.getInventory().items.set(slot, fresh);
+        finish(player, source);
+        return TransactionResult.ok("已更换打空的 " + spec.template.getHoverName().getString()
+            + "，消耗 " + spec.ammoCost + " 弹药");
     }
 
     private static int insertionCapacity(ServerPlayer player, ItemStack template) {
@@ -405,11 +553,16 @@ public final class ResupplySessionManager {
             .filter(MagazineSlot::full).mapToInt(slot -> slot.stack.getCount()).sum();
     }
 
-    private static boolean hasReplaceableMagazineOrSpace(ServerPlayer player, EntrySpec spec,
-                                                         MagazineCompat compat) {
-        List<MagazineSlot> matching = matchingMagazines(player, spec, compat);
-        if (matching.stream().anyMatch(slot -> !slot.full && slot.stack.getCount() == 1)) return true;
-        return insertionCapacity(player, compat.createFull(spec.template)) > 0;
+    private static boolean hasFillableMagazine(ServerPlayer player, EntrySpec spec,
+                                               MagazineCompat compat) {
+        return matchingMagazines(player, spec, compat).stream().anyMatch(slot -> !slot.full);
+    }
+
+    /** 背包里没有可填弹匣时，是否还能直接收下一个新的满弹匣。 */
+    private static boolean canReceiveNewMagazine(ServerPlayer player, EntrySpec spec,
+                                                 MagazineCompat compat) {
+        ItemStack replacement = compat.createFull(spec.template);
+        return !replacement.isEmpty() && insertionCapacity(player, replacement) > 0;
     }
 
     private static List<MagazineSlot> matchingMagazines(ServerPlayer player, EntrySpec spec,
@@ -417,22 +570,60 @@ public final class ResupplySessionManager {
         List<MagazineSlot> matches = new ArrayList<>();
         for (int slot = 0; slot < player.getInventory().items.size(); slot++) {
             ItemStack stack = player.getInventory().items.get(slot);
-            Optional<MagazineCompat.Identity> identity = compat.identity(stack);
-            if (identity.isEmpty() || !identity.get().equals(spec.magazineIdentity)) continue;
-            int rounds = compat.ammoCount(stack);
-            matches.add(new MagazineSlot(slot, stack, rounds,
-                rounds >= spec.magazineIdentity.capacity()));
+            collectMagazine(compat, spec, slot, stack, matches);
+            collectStoredMagazine(compat, spec, slot, stack, matches);
         }
+        ItemStack offhand = player.getInventory().offhand.get(0);
+        collectMagazine(compat, spec, OFFHAND_SLOT, offhand, matches);
+        collectStoredMagazine(compat, spec, OFFHAND_SLOT, offhand, matches);
         return matches;
     }
 
+    /**
+     * 枪械自带的弹匣（打空后仍留在枪里）同样算“可填充对象”。
+     * TaCZ Magazines 把弹匣存在枪的 NBT 里，不占背包格；只看背包会得出
+     * “没有可填充的弹匣”，玩家把弹打光后就再也补不上。
+     */
+    private static void collectStoredMagazine(MagazineCompat compat, EntrySpec spec, int slot,
+                                              ItemStack gun, List<MagazineSlot> out) {
+        if (gun.isEmpty()) return;
+        ItemStack stored = compat.storedMagazine(gun);
+        if (stored.isEmpty()) return;
+        Optional<MagazineCompat.Identity> identity = compat.identity(stored);
+        if (identity.isEmpty() || !compat.sameMagazineType(identity.get(), spec.magazineIdentity)) {
+            return;
+        }
+        int rounds = compat.ammoCount(stored);
+        out.add(new MagazineSlot(slot, stored, rounds, rounds >= spec.magazineIdentity.capacity(),
+            true));
+    }
+
+    private static void collectMagazine(MagazineCompat compat, EntrySpec spec, int slot,
+                                        ItemStack stack, List<MagazineSlot> out) {
+        if (stack.isEmpty()) return;
+        Optional<MagazineCompat.Identity> identity = compat.identity(stack);
+        if (identity.isEmpty() || !compat.sameMagazineType(identity.get(), spec.magazineIdentity)) {
+            return;
+        }
+        int rounds = compat.ammoCount(stack);
+        out.add(new MagazineSlot(slot, stack, rounds, rounds >= spec.magazineIdentity.capacity(),
+            false));
+    }
+
     private static List<ItemStack> snapshotInventory(ServerPlayer player) {
-        return player.getInventory().items.stream().map(ItemStack::copy).toList();
+        List<ItemStack> snapshot = new ArrayList<>(player.getInventory().items.size() + 1);
+        for (ItemStack stack : player.getInventory().items) snapshot.add(stack.copy());
+        snapshot.add(player.getInventory().offhand.get(0).copy());
+        return snapshot;
     }
 
     private static void restoreInventory(ServerPlayer player, List<ItemStack> snapshot) {
-        for (int i = 0; i < snapshot.size(); i++) {
+        int main = player.getInventory().items.size();
+        for (int i = 0; i < main && i < snapshot.size(); i++) {
             player.getInventory().setItem(i, snapshot.get(i).copy());
+        }
+        if (snapshot.size() > main) {
+            player.getInventory().offhand.set(0, snapshot.get(main).copy());
         }
         player.getInventory().setChanged();
     }
@@ -452,7 +643,25 @@ public final class ResupplySessionManager {
     @Nullable
     private static ResolvedSource resolveSource(ServerPlayer player, ResupplySourceRef ref,
                                                 @Nullable UUID expectedAccount) {
+        if (ref.kind() == ResupplySourceRef.Kind.MAIN_BASE_AMMO) {
+            // 主出生点无限弹药箱：必须仍是部署点旁自动放置的弹药箱（防伪造），
+            // 弹药值无限且永不消耗。
+            if (!org.espetro.logistics.DeploySupplyStationPlacer
+                .isMainBaseAmmoCrate(
+                    (net.minecraft.server.level.ServerLevel) player.serverLevel(), ref.blockPos())) {
+                return null;
+            }
+            return new ResolvedSource(new UUID(0L, 1L), () -> Integer.MAX_VALUE,
+                amount -> true, amount -> { }, () -> { });
+        }
         if (ref.kind() == ResupplySourceRef.Kind.RADIO) {
+            // 主基地（原部署点）无限弹药箱：轮盘「补给步兵」从弹药箱发起时
+            // source 仍标记为 radio(点击位置)，此处识别为主基地无限源。
+            if (org.espetro.logistics.DeploySupplyStationPlacer.isMainBaseAmmoCrate(
+                    (net.minecraft.server.level.ServerLevel) player.serverLevel(), ref.blockPos())) {
+                return new ResolvedSource(new UUID(0L, 1L), () -> Integer.MAX_VALUE,
+                    amount -> true, amount -> { }, () -> { });
+            }
             BastionData nearby = org.espetro.network.RadioRadialPacket
                 .findFriendlyRadioNearby(player, ref.blockPos());
             if (nearby == null || expectedAccount != null
@@ -503,7 +712,13 @@ public final class ResupplySessionManager {
         }
     }
 
-    private record MagazineSlot(int slot, ItemStack stack, int rounds, boolean full) {
+    /**
+     * @param slot   背包槽位（{@link #OFFHAND_SLOT} = 副手）
+     * @param stack  弹匣副本
+     * @param stored 是否是枪械 NBT 里的弹匣（TaCZMag_StoredMagazine），填满后要写回枪
+     */
+    private record MagazineSlot(int slot, ItemStack stack, int rounds, boolean full,
+                                boolean stored) {
     }
 
     private record ActionKey(UUID playerId, UUID accountId, String classId,

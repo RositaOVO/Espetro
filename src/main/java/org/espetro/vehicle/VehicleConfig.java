@@ -40,11 +40,43 @@ public class VehicleConfig {
         public Integer vehicleCrewSeats;
         public Set<String> entityTags = new LinkedHashSet<>();
         public DeploymentConfig deployment = new DeploymentConfig();
+        /** 抢滩前哨出生点（按下标与实体槽位对应；为空表示该类型没有前哨点）。 */
+        public List<DeploymentPointConfig> outpostAttack = new ArrayList<>();
+        public List<DeploymentPointConfig> outpostDefend = new ArrayList<>();
+        /** 前哨点在「第几批据点全部被占领」后启用。 */
+        public int outpostActivateAfterBatch = 1;
+
+        @Nullable
+        public DeploymentPointConfig outpostForTeam(String team, int slotIndex) {
+            List<DeploymentPointConfig> list = "ATTACK".equalsIgnoreCase(team)
+                ? outpostAttack : outpostDefend;
+            if (list == null || list.isEmpty()) {
+                return null;
+            }
+            return list.get(Math.floorMod(slotIndex, list.size()));
+        }
+
+        public boolean hasOutpostPoints(String team) {
+            List<DeploymentPointConfig> list = "ATTACK".equalsIgnoreCase(team)
+                ? outpostAttack : outpostDefend;
+            return list != null && !list.isEmpty();
+        }
         /** Ordered entity slots; index matches the map's ordered spawn points. */
         public List<VehicleSlotConfig> slots = new ArrayList<>();
         /** Type-level SNBT applied to every slot unless a slot overrides it. */
         @Nullable
         public String nbt;
+        /**
+         * 战术地图图标文件名（如 {@code "map_trackedheavyifv.png"}），来自编制 JSON 的
+         * {@code vehicles.<type>.map_icon}；null/空 = 沿用 EsPoints 的车型关键字兜底图标。
+         * 只是同步给客户端的展示数据，不参与服务端逻辑。
+         */
+        @Nullable
+        public String mapIcon;
+        /** 部署时写入载具集装箱的物品（"<itemId>[<snbt>] <count>"），slot 未单独指定时使用。 */
+        public List<String> items = new ArrayList<>();
+        /** 未显式配置 items 时，是否套用 data/<ns>/supply_station/ 的补给站弹药配置（默认开）。 */
+        public boolean supplyLoadout = true;
         /** 补给载具：可装载弹药和建材 */
         public boolean supplyVeh;
         /** 步兵战斗载具：仅携带弹药，不携带建材 */
@@ -53,14 +85,24 @@ public class VehicleConfig {
         public int supplyCapacity;
         /** 旧编制未声明载具补给类型时，是否按战斗载具兼容。 */
         boolean legacyDefaultedToFightVehicle;
+        /**
+         * 编制 JSON 是否显式声明 {@code fightveh: true}（步兵战斗载具）。
+         * 只有这类载具允许在载具内更换完整职业列表；补给载具、显式双 false 的载具
+         * 以及未声明标签的旧载具都只能换成驾驶员/载具队长，
+         * 见 {@link VehicleClassChangePolicy#allowsFullClassChange}。
+         */
+        public boolean explicitFightVehicle;
         /** 作为攻方时首次可部署前等待秒数（开战起算） */
         public int initialDeployDelayAttackSeconds;
         /** 作为守方时首次可部署前等待秒数（开战起算） */
         public int initialDeployDelayDefendSeconds;
         /** 是否可装载建材 */
         public boolean canCarryConstruction() { return supplyVeh; }
-        /** 只有补给载具可作为移动换装点，换装消耗其携带的弹药。 */
-        public boolean canChangeClass() { return supplyVeh; }
+        /**
+         * 战斗载具与补给载具都可作为移动换装点，换装消耗其携带的弹药。
+         * 可用职业列表另由 {@link VehicleClassChangePolicy} 按载具类别收敛。
+         */
+        public boolean canChangeClass() { return supplyVeh || fightVeh; }
 
         public int initialDeployDelaySeconds(String team) {
             if ("DEFEND".equalsIgnoreCase(team)) {
@@ -100,6 +142,8 @@ public class VehicleConfig {
         /** Optional SNBT merged onto the entity at deploy time (e.g. Energy). */
         @Nullable
         public String nbt;
+        /** 部署时写入载具集装箱的物品（"<itemId>[<snbt>] <count>"）。 */
+        public List<String> items = new ArrayList<>();
 
         @Nullable
         public EntityType<?> getEntityType() {
@@ -174,6 +218,8 @@ public class VehicleConfig {
      */
     public static void applyActiveMap(ActiveMapConfig map) {
         VEHICLE_CONFIGS.clear();
+        // 换图 / 开图 = 前哨点回到未解锁状态。
+        org.espetro.vehicle.OutpostSpawnGate.reset();
         if (map == null || !map.usable) return;
         int legacyVehicleTypes = 0;
         FactionDataLoader loader = FactionDataProvider.getOrCreateLoader();
@@ -194,7 +240,12 @@ public class VehicleConfig {
                 cfg.perMaxCount = perMax;
                 cfg.displayName = firstNonBlank(data.displayName, type);
                 cfg.troopValue = Math.max(0, data.troopValue);
+                cfg.mapIcon = firstNonBlank(data.mapIcon, null);
                 cfg.nbt = firstNonBlank(data.nbt, null);
+                addVehicleItems(cfg.items, data.items);
+                if (data.supplyLoadout != null) cfg.supplyLoadout = data.supplyLoadout;
+                // 必须复制组员座位配置，否则运行时所有载具都会被当作无需组员装备
+                cfg.vehicleCrewSeats = data.vehicleCrewSeats;
                 applySupplyProfile(cfg, data.supplyVeh, data.fightVeh, data.capacity);
                 if (cfg.legacyDefaultedToFightVehicle) legacyVehicleTypes++;
                 if (data.initialDeployDelay != null) {
@@ -213,12 +264,22 @@ public class VehicleConfig {
                     slot.attack = fromPose(points.get(i).attack());
                     slot.defend = fromPose(points.get(i).defend());
                     slot.nbt = cfg.nbt;
+                    slot.items = cfg.items;
                     cfg.slots.add(slot);
                 }
                 if (!cfg.slots.isEmpty()) {
                     cfg.entityTypeStr = cfg.slots.get(0).entityTypeStr;
                     cfg.deployment.attack = cfg.slots.get(0).attack;
                     cfg.deployment.defend = cfg.slots.get(0).defend;
+                }
+                List<VehSpawnSnapshot.SpawnPoint> outposts =
+                    map.vehSpawn.outpostPointsByType.get(type);
+                if (outposts != null && !outposts.isEmpty()) {
+                    cfg.outpostActivateAfterBatch = map.vehSpawn.outpostActivateAfterBatch;
+                    for (VehSpawnSnapshot.SpawnPoint point : outposts) {
+                        cfg.outpostAttack.add(fromPose(point.attack()));
+                        cfg.outpostDefend.add(fromPose(point.defend()));
+                    }
                 }
                 typeMap.put(type, cfg);
             }
@@ -248,8 +309,11 @@ public class VehicleConfig {
         cfg.entityTypeStr = vd.entityTypeStr;
         cfg.displayName = firstNonBlank(vd.displayName, vehicleType);
         cfg.troopValue = Math.max(0, vd.troopValue);
+        cfg.mapIcon = firstNonBlank(vd.mapIcon, null);
         cfg.vehicleCrewSeats = vd.vehicleCrewSeats;
         cfg.nbt = firstNonBlank(vd.nbt, null);
+        addVehicleItems(cfg.items, vd.items);
+        if (vd.supplyLoadout != null) cfg.supplyLoadout = vd.supplyLoadout;
         // 载具补给类型和容量
         applySupplyProfile(cfg, vd.supplyVeh, vd.fightVeh, vd.capacity);
         if (vd.initialDeployDelay != null) {
@@ -274,8 +338,11 @@ public class VehicleConfig {
     }
 
     /**
-     * 兼容新增 fightveh/supplyveh 字段之前的编制：两项都缺失时按战斗载具处理。
+     * 兼容新增 fightveh/supplyveh 字段之前的编制：两项都缺失时按战斗载具处理（装卸与容量语义）。
      * 任一字段被显式声明后不再启用兼容回退，因此两个 false 仍可明确关闭载具轮盘。
+     *
+     * <p>注意：载具内换职白名单只认显式 {@code fightveh: true}；兼容回退来的“无标签载具”
+     * 与补给载具一样只能换成驾驶员/载具队长，见 {@link VehicleClassChangePolicy}。</p>
      */
     static void applySupplyProfile(VehicleTypeConfig cfg, @Nullable Boolean supplyVeh,
                                    @Nullable Boolean fightVeh, @Nullable Integer capacity) {
@@ -283,6 +350,7 @@ public class VehicleConfig {
         cfg.supplyVeh = Boolean.TRUE.equals(supplyVeh);
         cfg.fightVeh = Boolean.TRUE.equals(fightVeh) || legacy;
         cfg.legacyDefaultedToFightVehicle = legacy;
+        cfg.explicitFightVehicle = Boolean.TRUE.equals(fightVeh);
 
         if (capacity != null && capacity > 0) {
             cfg.supplyCapacity = capacity;
@@ -298,8 +366,9 @@ public class VehicleConfig {
     private static void warnLegacyVehicleTypes(int count) {
         if (count <= 0) return;
         Espetro.LOGGER.warn(
-            "检测到 {} 个未声明 fightveh/supplyveh 的旧载具类型，已按 fightveh=true 兼容；"
-                + "补给载具请显式配置 supplyveh=true", count);
+            "检测到 {} 个未声明 fightveh/supplyveh 的旧载具类型，已按 fightveh=true 兼容装卸；"
+                + "其载具内换职按“无标签载具”处理（仅驾驶员/载具队长），"
+                + "需要完整职业列表请显式配置 fightveh=true，补给载具请显式配置 supplyveh=true", count);
     }
 
     private static DeploymentConfig buildDeploymentConfig(String vehicleType, FactionDataLoader.VehicleData vd) {
@@ -341,6 +410,14 @@ public class VehicleConfig {
     @Nullable
     private static String firstNonBlank(@Nullable String first, @Nullable String fallback) {
         return first != null && !first.isBlank() ? first : fallback;
+    }
+
+    /** 复制编制里配置的载具集装箱物品（"<itemId>[<snbt>] <count>"），跳过空项。 */
+    private static void addVehicleItems(List<String> target, @Nullable String[] source) {
+        if (source == null) return;
+        for (String item : source) {
+            if (item != null && !item.isBlank()) target.add(item.trim());
+        }
     }
 
     /**

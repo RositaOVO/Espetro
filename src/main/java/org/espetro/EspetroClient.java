@@ -15,6 +15,12 @@ public class EspetroClient {
      */
     @SuppressWarnings({"unchecked", "removal"})
     public static void init() {
+        // Normally already installed by EspetroMixinPlugin. A failed early disk
+        // operation must not abort startup; retry without injecting FancyMenu.
+        org.espetro.client.ui.BundledMenuInstaller.installForClient(
+            net.minecraftforge.fml.loading.FMLPaths.GAMEDIR.get());
+        org.espetro.client.ui.BundledPreviewInstaller.installForClient(
+            net.minecraftforge.fml.loading.FMLPaths.GAMEDIR.get());
         // 注册 MOD 事件总线（快捷键注册）
         // FMLJavaModLoadingContext.get() 在 Forge 1.20+ 已过时，但 1.20.1 仍可用
         net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext.get().getModEventBus()
@@ -23,6 +29,9 @@ public class EspetroClient {
             .addListener(EspetroClient::registerReloadListeners);
         net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext.get().getModEventBus()
             .addListener(EspetroClient::onClientSetup);
+
+        org.espetro.client.gui.ClientUiCommands.initialize(
+            net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext.get().getModEventBus());
 
         // 注册 FORGE 事件总线（Tick + HUD 渲染 + 隐藏玩家名字）
         net.minecraftforge.common.MinecraftForge.EVENT_BUS
@@ -35,21 +44,21 @@ public class EspetroClient {
             .addListener(EspetroClient::onRenderOverlay);
         net.minecraftforge.common.MinecraftForge.EVENT_BUS
             .addListener(EspetroClient::onRenderNameTag);
-        net.minecraftforge.common.MinecraftForge.EVENT_BUS
-            .addListener(EspetroClient::onLivingJump);
 
-        org.espetro.client.gui.AuraTipRadialController.initialize();
+        org.espetro.client.gui.TacticalRadialController.initialize();
         org.espetro.client.gui.RadioRadialController.initialize();
         org.espetro.client.gui.VehicleWheelController.initialize();
         org.espetro.client.gui.ResupplyRadialController.initialize();
+        org.espetro.client.gui.FixedWeaponWheelController.initialize();
         org.espetro.client.gui.VehicleSupplyHud.register();
+        org.espetro.client.vehicle.VehicleMountClientGate.register();
+        org.espetro.client.vehicle.DismountGate.register();
+        org.espetro.client.vehicle.SeatSwitchGate.register();
         org.espetro.client.gui.FobSupplyHud.register();
-        org.espetro.client.gui.SeatSwitchHandler.register();
-        net.minecraftforge.common.MinecraftForge.EVENT_BUS
-            .addListener(org.espetro.client.EquipZoneRenderer::onRenderLevel);
-        // AuraTip 默认画在 HUD；部署等主 GUI 打开时再叠一层到 Screen 之上
         net.minecraftforge.common.MinecraftForge.EVENT_BUS
             .addListener(org.espetro.client.gui.AuraTipAboveScreen::onScreenRenderPost);
+        net.minecraftforge.common.MinecraftForge.EVENT_BUS
+            .addListener(org.espetro.client.EquipZoneRenderer::onRenderLevel);
         net.minecraftforge.common.MinecraftForge.EVENT_BUS
             .addListener(EspetroClient::onRightClickBlock);
         net.minecraftforge.common.MinecraftForge.EVENT_BUS
@@ -58,6 +67,24 @@ public class EspetroClient {
             .addListener(org.espetro.client.FortificationPlacementController::onInteraction);
         net.minecraftforge.common.MinecraftForge.EVENT_BUS
             .addListener(org.espetro.client.FortificationPlacementController::render);
+        net.minecraftforge.common.MinecraftForge.EVENT_BUS
+            .addListener(org.espetro.client.FortificationWandOverlay::render);
+        net.minecraftforge.common.MinecraftForge.EVENT_BUS
+            .addListener(org.espetro.client.FortificationWandOverlay::renderHud);
+        net.minecraftforge.common.MinecraftForge.EVENT_BUS
+            .addListener(org.espetro.client.splash.SplashVideoController::onScreenInit);
+        net.minecraftforge.common.MinecraftForge.EVENT_BUS
+            .addListener(org.espetro.client.splash.SplashEarlyRenderer::onClientTick);
+        net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext.get().getModEventBus()
+            .addListener(EspetroClient::onSoundEngineLoad);
+    }
+
+    /** 原版声音引擎加载完成后才允许碰 OpenAL。 */
+    public static void onSoundEngineLoad(
+        net.minecraftforge.client.event.sound.SoundEngineLoadEvent event) {
+        // Forge also fires this event from the constructor, before OpenAL initialization.
+        boolean loaded = ((org.espetro.mixin.client.SoundEngineStateAccessor) event.getEngine()).espetro$isLoaded();
+        org.espetro.client.splash.SplashWavAudio.setAlReady(loaded);
     }
 
     // ==================== 事件处理方法 ====================
@@ -76,12 +103,17 @@ public class EspetroClient {
             "key.espetro.class", 74, "key.categories.espetro");
         net.minecraft.client.KeyMapping keyRadial = new net.minecraft.client.KeyMapping(
             "key.espetro.radial", org.lwjgl.glfw.GLFW.GLFW_KEY_LEFT_ALT, "key.categories.espetro");
+        // 工事预览时按 R 顺时针旋转 90°（非预览状态无作用）
+        net.minecraft.client.KeyMapping keyFortRotate = new net.minecraft.client.KeyMapping(
+            "key.espetro.fort_rotate", org.lwjgl.glfw.GLFW.GLFW_KEY_R, "key.categories.espetro");
         event.register(keyTeam);
         event.register(keyClass);
         event.register(keyRadial);
+        event.register(keyFortRotate);
         Espetro.KEY_TEAM = keyTeam;
         Espetro.KEY_CLASS = keyClass;
         Espetro.KEY_RADIAL = keyRadial;
+        Espetro.KEY_FORT_ROTATE = keyFortRotate;
     }
 
     private static void registerReloadListeners(
@@ -97,14 +129,18 @@ public class EspetroClient {
 
         net.minecraft.client.KeyMapping radialKey =
             Espetro.KEY_RADIAL instanceof net.minecraft.client.KeyMapping key ? key : null;
-        org.espetro.client.gui.AuraTipRadialController.tick(mc, radialKey);
+        org.espetro.client.gui.TacticalRadialController.tick(mc, radialKey);
         org.espetro.client.gui.RadioRadialController.tick(mc);
         org.espetro.client.gui.VehicleWheelController.tick(mc);
         org.espetro.client.gui.ResupplyRadialController.tick();
         org.espetro.client.FortificationPlacementController.tick(mc);
+        org.espetro.client.FixedWeaponInteractController.tick(mc);
+        org.espetro.client.gui.FixedWeaponWheelController.tick();
         org.espetro.client.gui.TutorialOverlay.tick();
         org.espetro.client.audio.ClientFormationAudioManager.tick(mc);
-        // 无 Screen 时左下「退出教程」点击（有 Screen 时由 MutilScreen 处理）
+        // 载具/补给站实体补加：区块未 FULL 时被暂存的实体在此重试补加（方案 A）
+        org.espetro.client.vehicle.ClientEntityRetryQueue.retry(mc);
+        // 无 Screen 时左下「退出教程」点击（有 Screen 时由 EspetroMenuScreen 处理）
         if (org.espetro.client.gui.TutorialClientController.isActive() && mc.screen == null) {
             boolean down = org.lwjgl.glfw.GLFW.glfwGetMouseButton(
                 mc.getWindow().getWindow(), org.lwjgl.glfw.GLFW.GLFW_MOUSE_BUTTON_LEFT)
@@ -121,12 +157,6 @@ public class EspetroClient {
         }
 
         if (mc.player == null) return;
-
-        // 客户端立即抑制耗尽后的奔跑，服务端仍会执行权威校验。
-        if (org.espetro.client.gui.StaminaOverlay.isExhausted()) {
-            mc.player.setSprinting(false);
-            mc.options.keySprint.setDown(false);
-        }
 
         // K键 - 请求游戏状态后打开对应界面（不直接打开，先请求服务端）
         if (Espetro.KEY_TEAM != null && ((net.minecraft.client.KeyMapping) Espetro.KEY_TEAM).consumeClick()) {
@@ -159,28 +189,17 @@ public class EspetroClient {
         }
     }
 
-    private static void onRenderOverlay(net.minecraftforge.client.event.RenderGuiOverlayEvent.Post event) {
+    private static void onRenderOverlay(net.minecraftforge.client.event.RenderGuiEvent.Post event) {
         net.minecraft.client.Minecraft mc = net.minecraft.client.Minecraft.getInstance();
-        if (mc != null && mc.level != null) {
-            if (mc.screen == null) {
-                org.espetro.client.gui.MutilHudOverlay.render(
-                    event.getGuiGraphics(), mc, event.getPartialTick());
-            }
-            // 教程 HUD 始终叠在最上层（含预览 Screen 打开时）
-            org.espetro.client.gui.TutorialHudOverlay.render(
-                event.getGuiGraphics(), mc, event.getPartialTick());
-        }
-    }
-
-    private static void onLivingJump(
-            net.minecraftforge.event.entity.living.LivingEvent.LivingJumpEvent event) {
-        net.minecraft.client.Minecraft mc = net.minecraft.client.Minecraft.getInstance();
-        if (mc.player == null || event.getEntity() != mc.player
-                || !org.espetro.client.gui.StaminaOverlay.isEnabled()) {
+        if (mc == null || mc.level == null) {
             return;
         }
-
-        org.espetro.network.NetworkManager.sendStaminaJump();
+        if (mc.screen == null) {
+            org.espetro.client.gui.EspetroHudOverlay.render(
+                event.getGuiGraphics(), mc, event.getPartialTick());
+        }
+        org.espetro.client.gui.TutorialHudOverlay.render(
+            event.getGuiGraphics(), mc, event.getPartialTick());
     }
 
     /**

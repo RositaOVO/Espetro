@@ -22,3 +22,22 @@
 # virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
 hs_err_pid*
 replay_pid*
+# Gradle 本机构建缓存（不应入库）
+.gradle/
+
+# Python 工具缓存
+__pycache__/
+*.pyc
+
+# 含面板凭据的部署脚本（勿入库）
+tools/mcsm-deploy.js
+
+# 构建输出、开发运行目录、IDE 产物、旧日志（都不应入库；构建时自动重建）
+/build/
+/bin/
+/run/
+/logs/
+/assets/
+
+# 旧版临时目录
+/build/tmp/

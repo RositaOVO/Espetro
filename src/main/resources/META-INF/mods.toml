@@ -62,20 +62,6 @@ versionRange = "${minecraft_version_range}"
 ordering = "NONE"
 side = "BOTH"
 
-[[dependencies."${mod_id}"]] #optional
-# the modid of the dependency
-modId = "mutil" #mandatory
-# Does this dependency have to exist - if not, ordering below must be specified
-mandatory = true #mandatory
-# The version range of the dependency
-versionRange = "6.3.0" #mandatory
-# An ordering relationship for the dependency - BEFORE or AFTER required if the dependency is not mandatory
-# BEFORE - This mod is loaded BEFORE the dependency
-# AFTER - This mod is loaded AFTER the dependency
-ordering = "NONE"
-# Side this dependency is applied on - BOTH, CLIENT, or SERVER
-side = "BOTH"# Here's another dependency
-
 [[dependencies."${mod_id}"]]
 modId = "oelib"
 mandatory = true
@@ -83,11 +69,17 @@ versionRange = "[${oelib_version},)"
 ordering = "AFTER"
 side = "BOTH"
 
-
 [[dependencies."${mod_id}"]]
 modId = "auratip"
 mandatory = true
 versionRange = "[${auratip_version}]"
+ordering = "AFTER"
+side = "BOTH"
+
+[[dependencies."${mod_id}"]]
+modId = "apricityui"
+mandatory = true
+versionRange = "[${apricityui_version}]"
 ordering = "AFTER"
 side = "BOTH"
 
@@ -105,13 +97,7 @@ versionRange = "${taczmagazines_version_range}"
 ordering = "AFTER"
 side = "BOTH"
 
-[[dependencies."${mod_id}"]]
-modId = "pingwheel"
-mandatory = true
-versionRange = "[${pingwheel_version}]"
-ordering = "AFTER"
-side = "BOTH"
-
+# pingwheel 已从 Espetro 剥离（战术标点改由 ESPoints 实现）；不再强制依赖。
 
 [[dependencies."${mod_id}"]]
 modId = "rhino"
@@ -156,3 +142,27 @@ mandatory = false
 versionRange = "[0,)"
 ordering = "AFTER"
 side = "BOTH"
+
+# 体力由 EsICO 提供；未安装则无体力。上车/换座/下车读条由 Espetro 自身实现。
+[[dependencies."${mod_id}"]]
+modId = "esico"
+mandatory = false
+versionRange = "[0,)"
+ordering = "AFTER"
+side = "BOTH"
+
+
+[[dependencies."${mod_id}"]]
+modId = "esradial"
+mandatory = true
+versionRange = "[${esradial_version}]"
+ordering = "AFTER"
+side = "CLIENT"
+
+# Live glass rendering is supplied by FancyMenu on the client only.
+[[dependencies."${mod_id}"]]
+modId = "fancymenu"
+mandatory = true
+versionRange = "[3.9.9,4)"
+ordering = "AFTER"
+side = "CLIENT"
