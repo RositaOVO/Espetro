@@ -38,3 +38,6 @@ logs/
 # Python cache
 __pycache__/
 *.pyc
+
+# CI 依赖检出与桩构建目录
+.deps/
